@@ -1,0 +1,1017 @@
+import { Injectable, InternalServerErrorException, BadRequestException, Logger, UnprocessableEntityException, NotFoundException } from '@nestjs/common';
+import { ReferralDto } from 'src/users/dtos/referral_dto';
+import { ReferralEntity } from 'src/users/entities/referral_entity';
+import { ProfileMapper } from 'src/users/mapper/profile_mapper';
+import { ReferralEntityMapper } from 'src/users/mapper/referral_entity_maper';
+import { DataSource } from 'typeorm';
+import { EarningCalculator } from './utils/earning_calculator';
+import { SubmitPaymentDto } from './dtos/submit_payment_dto';
+import { SubmitStakingPaymentDto } from './dtos/submit_staking_payment_dto';
+import { SubmitUplinePaymentDto } from './dtos/submit_upline_payment_dto';
+import { UpdateStakingSettingsDto } from './dtos/update_staking_settings_dto';
+import { JsonRpcProvider } from 'ethers';
+import { NetworkUtils } from 'src/utils/network_utils';
+import { stat } from 'fs';
+import { hash } from 'crypto';
+
+@Injectable()
+export class ProductsService {
+    private readonly logger = new Logger(ProductsService.name);
+
+    constructor(private dataSource: DataSource) {}
+
+    
+    async getAllMinings(
+        offset: number,
+        limit: number,
+        packageName?: string,
+        startDate?: number,
+        endDate?: number,
+    ): Promise<{ data: any[]; total: number }> {
+        this.logger.debug(`Fetching all minings with offset=${offset}, limit=${limit}, packageName=${packageName}, startDate=${startDate}, endDate=${endDate}`);
+        try {
+            const conditions: string[] = [];
+            const params: any[] = [];
+
+            if (packageName) {
+                conditions.push('s.sub_package_name = ?');
+                params.push(packageName);
+            }
+            if (startDate) {
+                conditions.push('m.min_created_at >= ?');
+                params.push(startDate);
+            }
+            if (endDate) {
+                conditions.push('m.min_created_at <= ?');
+                params.push(endDate);
+            }
+
+            const whereClause = conditions.length > 0 ? 'WHERE ' + conditions.join(' AND ') : '';
+
+            const countQuery = `
+                SELECT COUNT(*) as total FROM minings m
+                LEFT JOIN subscriptions s ON s.sub_id = m.min_subscription_id
+                ${whereClause}
+            `;
+            const countResult = await this.dataSource.query(countQuery, [...params]);
+            const total = parseInt(countResult[0].total, 10);
+
+            const query = `
+                SELECT s.*, m.min_id, m.uid as m_uid, m.email as m_email,
+                       m.min_created_at, m.min_updated_at, m.min_subscription_id,
+                       m.mining_tag, m.mining_wallet_hash, m.mining_wallet_address,
+                       p.referral_code
+                FROM minings m
+                LEFT JOIN subscriptions s ON s.sub_id = m.min_subscription_id
+                LEFT JOIN profiles p ON p.uid = m.uid
+                ${whereClause}
+                ORDER BY m.min_created_at DESC
+                LIMIT ? OFFSET ?
+            `;
+            const results = await this.dataSource.query(query, [...params, limit, offset]);
+
+            // Collect unique uid+subId pairs from results
+            const uids: string[] = [];
+            const subIds: string[] = [];
+            const seen = new Set<string>();
+            for (const row of results) {
+                const key = `${row.m_uid}::${row.sub_id}`;
+                if (!seen.has(key) && row.m_uid && row.sub_id) {
+                    seen.add(key);
+                    uids.push(row.m_uid);
+                    subIds.push(row.sub_id);
+                }
+            }
+
+            // Batch fetch referral counts using reusable methods
+            const directCountMap = await this.getMiningDirectReferralCounts(uids, subIds);
+            const indirectCountMap = await this.getMiningIndirectReferralCounts(uids, subIds);
+
+            // Batch fetch payment status for all minings in this page
+            const minIds = results.map((row: any) => row.min_id).filter(Boolean);
+            const paidTiersMap = await this.getBatchPaymentStatus(minIds);
+
+            const makeKey = (uid: string, subId: string) => `${uid}::${subId}`;
+            const data = results.map((row: any) => {
+                const key = makeKey(row.m_uid, row.sub_id);
+                const pkg = row.sub_package_name || '';
+                const directCount = directCountMap.get(key) || 0;
+                const indirectCount = indirectCountMap.get(key) || 0;
+                const earnings = EarningCalculator.calcTotalEarning(pkg, directCount, indirectCount);
+
+                // Calculate payment eligibility from paid tiers + direct referral count
+                const paidTiers = paidTiersMap.get(row.min_id) || [];
+                let nextTier: number | null = null;
+                for (const tier of ProductsService.PAYMENT_TIERS) {
+                    if (!paidTiers.includes(tier) && directCount >= tier) {
+                        nextTier = tier;
+                        break;
+                    }
+                }
+
+                return {
+                    mining: {
+                        min_id: row.min_id,
+                        uid: row.m_uid,
+                        email: row.m_email,
+                        min_created_at: row.min_created_at,
+                        min_updated_at: row.min_updated_at,
+                        min_subscription_id: row.min_subscription_id,
+                        mining_tag: row.mining_tag,
+                        mining_wallet_hash: row.mining_wallet_hash,
+                        mining_wallet_address: row.mining_wallet_address,
+                    },
+                    subscription: {
+                        sub_id: row.sub_id,
+                        uid: row.uid,
+                        email: row.email,
+                        sub_type: row.sub_type,
+                        sub_chain_id: row.sub_chain_id,
+                        sub_asset_contract: row.sub_asset_contract,
+                        sub_asset_symbol: row.sub_asset_symbol,
+                        sub_asset_name: row.sub_asset_name,
+                        sub_asset_decimals: row.sub_asset_decimals,
+                        sub_asset_image: row.sub_asset_image,
+                        sub_created_at: row.sub_created_at,
+                        sub_updated_at: row.sub_updated_at,
+                        sub_status: row.sub_status,
+                        sub_reward_contract: row.sub_reward_contract,
+                        sub_reward_chain_id: row.sub_reward_chain_id,
+                        sub_reward_asset_name: row.sub_reward_asset_name,
+                        sub_reward_asset_symbol: row.sub_reward_asset_symbol,
+                        sub_reward_asset_image: row.sub_reward_asset_image,
+                        sub_reward_asset_decimals: row.sub_reward_asset_decimals,
+                        sub_package_name: row.sub_package_name,
+                        sub_duration: row.sub_duration,
+                        sub_price: row.sub_price,
+                        sub_referral_code: row.sub_referral_code,
+                        sub_mining_tag: row.sub_mining_tag,
+                        sub_wallet_hash: row.sub_wallet_hash,
+                        sub_wallet_address: row.sub_wallet_address,
+                    },
+                    referral_code: row.referral_code,
+                    direct_referral_count: directCount,
+                    indirect_referral_count: indirectCount,
+                    earnings,
+                    payment_status: {
+                        paid_tiers: paidTiers,
+                        next_tier: nextTier,
+                        is_eligible_for_payment: nextTier !== null,
+                    },
+                };
+            });
+
+            // Get distinct package names for filter dropdown
+            const packageNames = await this.getDistinctPackageNames();
+
+            return { data, total, packageNames } as any;
+        } catch (err) {
+            this.logger.error('Error fetching all minings:', err);
+            throw new InternalServerErrorException('Failed to fetch minings');
+        }
+    }
+
+    async getDistinctPackageNames(): Promise<string[]> {
+        try {
+            const query = `SELECT DISTINCT s.sub_package_name FROM subscriptions s WHERE s.sub_package_name IS NOT NULL ORDER BY s.sub_package_name ASC`;
+            const results = await this.dataSource.query(query);
+            return results.map((row: any) => row.sub_package_name);
+        } catch (err) {
+            this.logger.error('Error fetching distinct package names:', err);
+            return [];
+        }
+    }
+
+    /**
+     * Batch fetch direct referral counts for multiple uid+subId pairs.
+     * Returns a Map<"uid::subId", count>.
+     */
+    // Example input: uids = ["u1", "u2"], subIds = ["s1", "s2"]
+    // Means
+    //(u1, s1)
+    // (u2, s2)
+    async getMiningDirectReferralCounts(uids: string[], subIds: string[]): Promise<Map<string, number>> {
+        const makeKey = (uid: string, subId: string) => `${uid}::${subId}`;
+        const countMap = new Map<string, number>();
+        if (uids.length === 0) return countMap;
+  
+        const placeholders = uids.map(() => `(?, ?)`).join(', ');
+        // Suppose uids = ["u1", "u2", "u3"]
+        // This creates: (?, ?), (?, ?), (?, ?)
+        // These placeholders are used in SQL prepared statements.
+        const params: string[] = [];
+        for (let i = 0; i < uids.length; i++) {
+            params.push(uids[i], subIds[i]);
+        }
+
+        const query = `
+            SELECT referral_uid, referral_subscription_id, COUNT(*) as cnt
+            FROM referrals
+            WHERE (referral_uid, referral_subscription_id) IN (${placeholders})
+            GROUP BY referral_uid, referral_subscription_id
+        `;
+        const results = await this.dataSource.query(query, params);
+        for (const row of results) {
+            countMap.set(
+                makeKey(row.referral_uid, row.referral_subscription_id),
+                parseInt(row.cnt, 10),
+            );
+        }
+        return countMap;
+    }
+
+    /**
+     * Batch fetch indirect referral counts for multiple uid+subId pairs.
+     * Returns a Map<"uid::subId", count>.
+     */
+    async getMiningIndirectReferralCounts(uids: string[], subIds: string[]): Promise<Map<string, number>> {
+        const makeKey = (uid: string, subId: string) => `${uid}::${subId}`;
+        const countMap = new Map<string, number>();
+        if (uids.length === 0) return countMap;
+
+        const conditions = subIds.map(() => `(JSON_CONTAINS(r.referral_path, ?) AND r.referral_uid != ?)`).join(' OR ');
+        const params: string[] = [];
+        for (let i = 0; i < uids.length; i++) {
+            params.push(JSON.stringify([subIds[i]]), uids[i]);
+        }
+
+        const query = `
+            SELECT r.referral_uid, r.referral_path
+            FROM referrals r
+            WHERE ${conditions}
+        `;
+        const results = await this.dataSource.query(query, params);
+
+        for (const ir of results) {
+            const path = typeof ir.referral_path === 'string' ? JSON.parse(ir.referral_path) : ir.referral_path;
+            if (!Array.isArray(path)) continue;
+            for (let i = 0; i < uids.length; i++) {
+                if (path.includes(subIds[i]) && ir.referral_uid !== uids[i]) {
+                    const key = makeKey(uids[i], subIds[i]);
+                    countMap.set(key, (countMap.get(key) || 0) + 1);
+                }
+            }
+        }
+        return countMap;
+    }
+
+    /**
+     * Get detailed direct referrals for a single user + subscription (used by controller detail endpoint).
+     */
+    async getMiningDirectReferrals(uid: string, subscriptionId: string): Promise<ReferralDto[]> {
+        this.logger.debug(`Getting direct referrals for user ${uid}, subscription ${subscriptionId}`)
+        const referrals: ReferralDto[] = []
+        const query = `SELECT * FROM referrals r
+                       LEFT JOIN profiles p ON r.referree_uid = p.uid
+                       WHERE r.referral_uid = ? AND r.referral_subscription_id = ?`;
+        const referralRepository = this.dataSource.manager.getRepository(ReferralEntity)
+        const results: [] = await referralRepository.query(query, [uid, subscriptionId])
+        this.logger.debug(`Found ${results.length} direct referrals for user ${uid}`)
+        for (const row of results) {
+            const referralDto = new ReferralDto()
+            const referralEntity = ReferralEntityMapper.toEntity(row);
+            const referreeEntity = ProfileMapper.toEntity(row);
+            referralDto.info = referralEntity
+            referralDto.profile = referreeEntity
+            referrals.push(referralDto)
+        }
+        return referrals;
+    }
+
+    /**
+     * Get detailed indirect referrals for a single user + subscription (used by controller detail endpoint).
+     */
+    async getMiningIndirectReferrals(uid: string, subscriptionId: string): Promise<ReferralDto[]> {
+        this.logger.debug(`Getting indirect referrals for user ${uid}, subscription ${subscriptionId}`)
+        const referrals: ReferralDto[] = []
+        const query = `SELECT * FROM referrals r
+                       LEFT JOIN profiles p ON r.referree_uid = p.uid
+                       WHERE JSON_CONTAINS(r.referral_path, ?) AND r.referral_uid != ?`;
+        const referralRepository = this.dataSource.manager.getRepository(ReferralEntity)
+        const results: [] = await referralRepository.query(query, [JSON.stringify([subscriptionId]), uid])
+        this.logger.debug(`Found ${results.length} indirect referrals for user ${uid}`)
+        for (const row of results) {
+            const referralDto = new ReferralDto()
+            const referralEntity = ReferralEntityMapper.toEntity(row);
+            const referreeEntity = ProfileMapper.toEntity(row);
+            referralDto.info = referralEntity
+            referralDto.profile = referreeEntity
+            referrals.push(referralDto)
+        }
+        return referrals;
+    }
+
+    // ──────────────────────────────────────────────
+    // Payment tier system: 6^1=6, 6^2=36, 6^3=216, 6^4=1296
+    // ──────────────────────────────────────────────
+
+    static readonly PAYMENT_TIERS = [6, 36, 216, 1296];
+
+    /**
+     * Get the next unpaid tier for a mining based on direct referral count
+     * and existing payment records.
+     */
+    async getPaymentStatus(minId: string, uid: string, subscriptionId: string, directReferralCount: number): Promise<{
+        paidTiers: number[];
+        nextTier: number | null;
+        isEligibleForPayment: boolean;
+    }> {
+        // Get all existing payments for this mining
+        const payments = await this.dataSource.query(
+            `SELECT mp_payment_tier, mp_status FROM mining_payments WHERE mp_min_id = ? AND mp_status = 'confirmed' ORDER BY mp_payment_tier ASC`,
+            [minId],
+        );
+
+        const paidTiers = payments.map((p: any) => p.mp_payment_tier);
+
+        // Find the next unpaid tier that the user qualifies for
+        let nextTier: number | null = null;
+        for (const tier of ProductsService.PAYMENT_TIERS) {
+            if (!paidTiers.includes(tier) && directReferralCount >= tier) {
+                nextTier = tier;
+                break;
+            }
+        }
+
+        return {
+            paidTiers,
+            nextTier,
+            isEligibleForPayment: nextTier !== null,
+        };
+    }
+
+    /**
+     * Submit a payment for a mining after the admin sends the transaction on-chain.
+     */
+    async submitPayment(dto: SubmitPaymentDto): Promise<any> {
+        this.logger.debug(`Submitting payment for mining ${dto.min_id} with amount ${dto.amount} `);
+        const rpc = NetworkUtils.getRpc(dto.chain_id)
+        const res: { status: boolean; hash: string | null } = await this.submitTransaction(dto.tx_data, rpc)
+        if (!res.status) {
+            throw new UnprocessableEntityException('Transaction submission failed');
+        }
+        const txHash = res.hash;
+        return await this.dataSource.transaction(async manager => {
+            // 1. Look up the mining record
+            const miningRows = await this.dataSource.query(
+                `SELECT m.*, s.sub_id, s.sub_package_name, s.sub_reward_asset_symbol
+             FROM minings m
+             LEFT JOIN subscriptions s ON s.sub_id = m.min_subscription_id
+             WHERE m.min_id = ?`,
+                [dto.min_id],
+            );
+
+            if (!miningRows || miningRows.length === 0) {
+                throw new BadRequestException('Mining record not found');
+            }
+
+            const mining = miningRows[0];
+
+            // 2. Get direct referral count for this mining
+            const directCountMap = await this.getMiningDirectReferralCounts(
+                [mining.uid],
+                [mining.sub_id],
+            );
+            const directCount = directCountMap.get(`${mining.uid}::${mining.sub_id}`) || 0;
+
+            // 3. Determine payment status and next eligible tier
+            const paymentStatus = await this.getPaymentStatus(
+                dto.min_id,
+                mining.uid,
+                mining.sub_id,
+                directCount,
+            );
+
+            if (!paymentStatus.isEligibleForPayment || paymentStatus.nextTier === null) {
+                throw new BadRequestException(
+                    `Mining is not eligible for payment. Direct referrals: ${directCount}, paid tiers: [${paymentStatus.paidTiers.join(', ')}]`,
+                );
+            }
+
+            // 4. Insert payment record
+            const now = BigInt(Date.now());
+            await this.dataSource.query(
+                `INSERT INTO mining_payments (mp_id, mp_min_id, mp_uid, mp_subscription_id, mp_tx_hash, mp_tx_data, mp_amount, mp_chain_id, mp_reward_symbol, mp_payment_tier, mp_referral_count_at_payment, mp_status, mp_created_at, mp_updated_at)
+             VALUES (UUID(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'confirmed', ?, ?)`,
+                [
+                    dto.min_id,
+                    mining.uid,
+                    mining.sub_id,
+                    txHash || null,
+                    dto.tx_data || null,
+                    dto.amount,
+                    dto.chain_id,
+                    dto.reward_symbol || mining.sub_reward_asset_symbol || '',
+                    paymentStatus.nextTier,
+                    directCount,
+                    now.toString(),
+                    now.toString(),
+                ],
+            );
+
+            this.logger.log(`Payment recorded for mining ${dto.min_id} at tier ${paymentStatus.nextTier}`);
+
+            // 6. Recalculate next tier after this payment
+            const updatedStatus = await this.getPaymentStatus(
+                dto.min_id,
+                mining.uid,
+                mining.sub_id,
+                directCount,
+            );
+
+            return {
+                payment_tier: paymentStatus.nextTier,
+                referral_count: directCount,
+                next_tier: updatedStatus.nextTier,
+                is_eligible_for_next: updatedStatus.isEligibleForPayment,
+                paid_tiers: updatedStatus.paidTiers,
+            };
+        });
+    }
+
+    /**
+     * Batch fetch paid tiers for multiple mining IDs.
+     * Returns a Map<min_id, number[]> of confirmed payment tiers.
+     */
+    async getBatchPaymentStatus(minIds: string[]): Promise<Map<string, number[]>> {
+        const paidMap = new Map<string, number[]>();
+        if (minIds.length === 0) return paidMap;
+
+        const placeholders = minIds.map(() => '?').join(', ');
+        const payments = await this.dataSource.query(
+            `SELECT mp_min_id, mp_payment_tier FROM mining_payments WHERE mp_min_id IN (${placeholders}) AND mp_status = 'confirmed'`,
+            minIds,
+        );
+
+        for (const p of payments) {
+            const list = paidMap.get(p.mp_min_id) || [];
+            list.push(p.mp_payment_tier);
+            paidMap.set(p.mp_min_id, list);
+        }
+
+        return paidMap;
+    }
+
+    // ──────────────────────────────────────────────
+    // STAKING SECTION
+    // ──────────────────────────────────────────────
+
+    /**
+     * Get all stakings with referral counts and payment status, paginated.
+     */
+    async getAllStakings(
+        offset: number,
+        limit: number,
+        planName?: string,
+        status?: string,
+        startDate?: number,
+        endDate?: number,
+    ): Promise<{ data: any[]; total: number; planNames: string[] }> {
+        this.logger.debug(`Fetching all stakings offset=${offset}, limit=${limit}`);
+        try {
+            const conditions: string[] = [];
+            const params: any[] = [];
+
+            if (planName) {
+                conditions.push('st.staking_plan = ?');
+                params.push(planName);
+            }
+            if (status) {
+                conditions.push('st.staking_status = ?');
+                params.push(status);
+            }
+            if (startDate) {
+                conditions.push('st.stake_created_at >= ?');
+                params.push(startDate);
+            }
+            if (endDate) {
+                conditions.push('st.stake_created_at <= ?');
+                params.push(endDate);
+            }
+
+            const whereClause = conditions.length > 0 ? 'WHERE ' + conditions.join(' AND ') : '';
+
+            // Count
+            const countResult = await this.dataSource.query(
+                `SELECT COUNT(*) as total FROM stakings st ${whereClause}`,
+                [...params],
+            );
+            const total = parseInt(countResult[0].total, 10);
+            // Main query
+            const query = `
+                SELECT st.*
+                FROM stakings st
+                ${whereClause}
+                ORDER BY st.stake_created_at DESC
+                LIMIT ? OFFSET ?
+            `;
+            const results = await this.dataSource.query(query, [...params, limit, offset]);
+
+            // Batch referral counts for all stakings
+            const stakingIds = results.map((r: any) => r.staking_id).filter(Boolean);
+            const referralCountMap = await this.getStakingReferralCounts(stakingIds);
+
+            // Batch payment status
+            const paidCyclesMap = await this.getBatchStakingPaymentStatus(stakingIds);
+
+            // Get staking settings for payment amount lookup
+            const settingsMap = await this.getStakingSettingsMap();
+
+            const data = results.map((row: any) => {
+                const referralCount = referralCountMap.get(row.staking_id) || 0;
+                const paidCycles = paidCyclesMap.get(row.staking_id) || [];
+                const settings = settingsMap.get(row.staking_plan);
+                const referralsPerCycle = settings?.ss_referrals_per_cycle || 6;
+
+                // How many complete cycles of 6 referrals
+                const completedCycles = Math.floor(referralCount / referralsPerCycle);
+                // Max paid cycle number
+                const maxPaidCycle = paidCycles.length > 0 ? Math.max(...paidCycles) : 0;
+                // Next payable cycle
+                const nextCycle = maxPaidCycle + 1;
+
+                // Check staking duration hasn't expired
+                const now = Date.now();
+                const endDate = typeof row.end_date === 'string' ? parseInt(row.end_date, 10) : Number(row.end_date);
+                const isExpired = endDate > 0 && now > endDate;
+
+                const isEligible = !isExpired && completedCycles >= nextCycle;
+
+                // Compute actual double payment: plan_amount * 2 * (percentage / 100)
+                const rewardPercentage = settings?.ss_reward_percentage ?? 100;
+                const planAmount = settings?.ss_plan_amount ?? 0;
+                const computedDoublePayment = planAmount * 2 * (rewardPercentage / 100);
+
+                return {
+                    staking: {
+                        staking_id: row.staking_id,
+                        uid: row.uid,
+                        email: row.email,
+                        stake_created_at: row.stake_created_at,
+                        stake_updated_at: row.stake_updated_at,
+                        staked_asset_symbol: row.staked_asset_symbol,
+                        staked_asset_contract: row.staked_asset_contract,
+                        staked_asset_name: row.staked_asset_name,
+                        staked_asset_image: row.staked_asset_image,
+                        staked_amount_fiat: row.staked_amount_fiat,
+                        staked_amount_crypto: row.staked_amount_crypto,
+                        staking_status: row.staking_status,
+                        staking_reward_contract: row.staking_reward_contract,
+                        staking_reward_chain_id: row.staking_reward_chain_id,
+                        staking_reward_chain_name: row.staking_reward_chain_name,
+                        staking_reward_asset_name: row.staking_reward_asset_name,
+                        staking_reward_asset_symbol: row.staking_reward_asset_symbol,
+                        staking_reward_asset_decimals: row.staking_reward_asset_decimals,
+                        staking_reward_asset_image: row.staking_reward_asset_image,
+                        duration: row.duration,
+                        end_date: row.end_date,
+                        start_date: row.start_date,
+                        staking_wallet_hash: row.staking_wallet_hash,
+                        staking_wallet_address: row.staking_wallet_address,
+                        staking_referral_code: row.staking_referral_code,
+                        staking_plan: row.staking_plan,
+                    },
+                    referral_count: referralCount,
+                    payment_status: {
+                        paid_cycles: paidCycles,
+                        next_cycle: nextCycle,
+                        completed_referral_cycles: completedCycles,
+                        is_eligible_for_payment: isEligible,
+                        is_expired: isExpired,
+                        reward_percentage: rewardPercentage,
+                        double_payment_amount: computedDoublePayment,
+                    },
+                };
+            });
+
+            // Distinct plan names for filter
+            const planNamesResult = await this.dataSource.query(
+                `SELECT DISTINCT staking_plan FROM stakings WHERE staking_plan IS NOT NULL ORDER BY staking_plan ASC`,
+            );
+            const planNames = planNamesResult.map((r: any) => r.staking_plan);
+
+            return { data, total, planNames };
+        } catch (err) {
+            this.logger.error('Error fetching stakings:', err);
+            throw new InternalServerErrorException('Failed to fetch stakings');
+        }
+    }
+
+    /**
+     * Batch fetch referral counts for staking IDs.
+     * Counts how many referrees each staking has (using staking_referral_staking_id as the referrer's staking).
+     */
+    async getStakingReferralCounts(stakingIds: string[]): Promise<Map<string, number>> {
+        const countMap = new Map<string, number>();
+        if (stakingIds.length === 0) return countMap;
+
+        const placeholders = stakingIds.map(() => '?').join(', ');
+        const results = await this.dataSource.query(
+            `SELECT staking_referral_staking_id, COUNT(*) as cnt
+             FROM staking_referrals
+             WHERE staking_referral_staking_id IN (${placeholders})
+             GROUP BY staking_referral_staking_id`,
+            stakingIds,
+        );
+
+        for (const row of results) {
+            countMap.set(row.staking_referral_staking_id, parseInt(row.cnt, 10));
+        }
+        return countMap;
+    }
+
+    /**
+     * Batch fetch paid payment cycles for staking IDs.
+     */
+    async getBatchStakingPaymentStatus(stakingIds: string[]): Promise<Map<string, number[]>> {
+        const paidMap = new Map<string, number[]>();
+        if (stakingIds.length === 0) return paidMap;
+
+        const placeholders = stakingIds.map(() => '?').join(', ');
+        const payments = await this.dataSource.query(
+            `SELECT sp_staking_id, sp_payment_cycle FROM staking_payments WHERE sp_staking_id IN (${placeholders}) AND sp_status = 'confirmed'`,
+            stakingIds,
+        );
+
+        for (const p of payments) {
+            const list = paidMap.get(p.sp_staking_id) || [];
+            list.push(p.sp_payment_cycle);
+            paidMap.set(p.sp_staking_id, list);
+        }
+        return paidMap;
+    }
+
+    /**
+     * Get staking settings as a map keyed by plan name.
+     */
+    async getStakingSettingsMap(): Promise<Map<string, any>> {
+        const settingsMap = new Map<string, any>();
+        const results = await this.dataSource.query(
+            `SELECT * FROM staking_settings WHERE ss_is_active = 1`,
+        );
+        for (const row of results) {
+            settingsMap.set(row.ss_plan_name, row);
+        }
+        return settingsMap;
+    }
+
+    /**
+     * Get all staking settings (for admin settings page).
+     */
+    async getStakingSettings(): Promise<any[]> {
+        return await this.dataSource.query(
+            `SELECT * FROM staking_settings ORDER BY ss_plan_amount ASC`,
+        );
+    }
+
+    /**
+     * Update a staking setting.
+     */
+    async updateStakingSettings(dto: UpdateStakingSettingsDto): Promise<any> {
+        const existing = await this.dataSource.query(
+            `SELECT * FROM staking_settings WHERE ss_id = ?`,
+            [dto.ss_id],
+        );
+        if (!existing || existing.length === 0) {
+            throw new NotFoundException('Staking setting not found');
+        }
+
+        const updates: string[] = [];
+        const params: any[] = [];
+
+        if (dto.ss_reward_percentage !== undefined) {
+            updates.push('ss_reward_percentage = ?');
+            params.push(dto.ss_reward_percentage);
+        }
+        if (dto.ss_referrals_per_cycle !== undefined) {
+            updates.push('ss_referrals_per_cycle = ?');
+            params.push(dto.ss_referrals_per_cycle);
+        }
+        if (dto.ss_is_active !== undefined) {
+            updates.push('ss_is_active = ?');
+            params.push(dto.ss_is_active ? 1 : 0);
+        }
+
+        if (updates.length === 0) {
+            return existing[0];
+        }
+
+        updates.push('ss_updated_at = ?');
+        params.push(BigInt(Date.now()).toString());
+        params.push(dto.ss_id);
+
+        await this.dataSource.query(
+            `UPDATE staking_settings SET ${updates.join(', ')} WHERE ss_id = ?`,
+            params,
+        );
+
+        const updated = await this.dataSource.query(
+            `SELECT * FROM staking_settings WHERE ss_id = ?`,
+            [dto.ss_id],
+        );
+        return updated[0];
+    }
+
+    /**
+     * Submit a staking double payment.
+     */
+    async submitStakingPayment(dto: SubmitStakingPaymentDto): Promise<any> {
+        this.logger.debug(`Submitting staking payment for staking ${dto.staking_id}`);
+        // 1. Look up the staking record
+        const stakingRows = await this.dataSource.query(
+            `SELECT * FROM stakings WHERE staking_id = ?`,
+            [dto.staking_id],
+        );
+        if (!stakingRows || stakingRows.length === 0) {
+            throw new BadRequestException('Staking record not found');
+        }
+        const staking = stakingRows[0];
+        // 2. Check expiry
+        const now = Date.now();
+        const endDate = typeof staking.end_date === 'string' ? parseInt(staking.end_date, 10) : Number(staking.end_date);
+        if (endDate > 0 && now > endDate) {
+            throw new BadRequestException('Staking duration has expired');
+        }
+        const rpc = NetworkUtils.getRpc(dto.chain_id);
+        const res = await this.submitTransaction(dto.tx_data, rpc);
+        if (!res.status) {
+            throw new UnprocessableEntityException('Transaction submission failed');
+        }
+        const txHash = res.hash;
+
+        return await this.dataSource.transaction(async manager => {
+        
+            // 3. Get referral count
+            const refCountMap = await this.getStakingReferralCounts([dto.staking_id]);
+            const referralCount = refCountMap.get(dto.staking_id) || 0;
+
+            // 4. Get paid cycles and settings
+            const paidCyclesMap = await this.getBatchStakingPaymentStatus([dto.staking_id]);
+            const paidCycles = paidCyclesMap.get(dto.staking_id) || [];
+            const settingsMap = await this.getStakingSettingsMap();
+            const settings = settingsMap.get(staking.staking_plan);
+            const referralsPerCycle = settings?.ss_referrals_per_cycle || 6;
+
+            const completedCycles = Math.floor(referralCount / referralsPerCycle);
+            const maxPaidCycle = paidCycles.length > 0 ? Math.max(...paidCycles) : 0;
+            const nextCycle = maxPaidCycle + 1;
+
+            if (completedCycles < nextCycle) {
+                throw new BadRequestException(
+                    `Staking not eligible for payment. Referrals: ${referralCount}, completed cycles: ${completedCycles}, next payable cycle: ${nextCycle}`,
+                );
+            }
+
+            // 5. Insert payment record
+            const nowBig = BigInt(Date.now());
+            await this.dataSource.query(
+                `INSERT INTO staking_payments (sp_id, sp_staking_id, sp_uid, sp_email, sp_staking_plan, sp_amount, sp_tx_data, sp_tx_hash, sp_chain_id, sp_reward_symbol, sp_payment_cycle, sp_referral_count_at_payment, sp_status, sp_created_at, sp_updated_at)
+                 VALUES (UUID(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'confirmed', ?, ?)`,
+                [
+                    dto.staking_id,
+                    staking.uid,
+                    staking.email,
+                    staking.staking_plan,
+                    dto.amount,
+                    dto.tx_data || null,
+                    txHash || null,
+                    dto.chain_id,
+                    dto.reward_symbol || staking.staking_reward_asset_symbol || '',
+                    nextCycle,
+                    referralCount,
+                    nowBig.toString(),
+                    nowBig.toString(),
+                ],
+            );
+
+            this.logger.log(`Staking payment recorded for ${dto.staking_id} cycle ${nextCycle}`);
+
+            // 6. Auto-create pending upline payment (10% of the double reward goes to the upline)
+            try {
+                // Find the upline via staking_referrals: the row where staking_referree_staking_id = current staking
+                const uplineRows = await this.dataSource.query(
+                    `SELECT sr.*, s.email as upline_email
+                     FROM staking_referrals sr
+                     LEFT JOIN stakings s ON s.staking_id = sr.staking_referral_staking_id
+                     WHERE sr.staking_referree_staking_id = ?
+                     LIMIT 1`,
+                    [dto.staking_id],
+                );
+
+                if (uplineRows && uplineRows.length > 0) {
+                    const uplineRow = uplineRows[0];
+                    const uplineAmount = dto.amount * 0.10; // 10% of the double reward
+
+                    // Get the sp_id of the payment we just inserted
+                    const spRows = await this.dataSource.query(
+                        `SELECT sp_id FROM staking_payments WHERE sp_staking_id = ? AND sp_payment_cycle = ? AND sp_status = 'confirmed' ORDER BY sp_created_at DESC LIMIT 1`,
+                        [dto.staking_id, nextCycle],
+                    );
+                    const spId = spRows?.[0]?.sp_id || '';
+
+                    await this.dataSource.query(
+                        `INSERT INTO staking_upline_payments (sup_id, sup_staking_payment_id, sup_upline_uid, sup_upline_email, sup_upline_staking_id, sup_downline_uid, sup_downline_staking_id, sup_downline_staking_plan, sup_amount, sup_chain_id, sup_reward_symbol, sup_status, sup_created_at, sup_updated_at)
+                         VALUES (UUID(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
+                        [
+                            spId,
+                            uplineRow.staking_referral_uid,
+                            uplineRow.upline_email || '',
+                            uplineRow.staking_referral_staking_id,
+                            staking.uid,
+                            dto.staking_id,
+                            staking.staking_plan,
+                            uplineAmount,
+                            dto.chain_id,
+                            dto.reward_symbol || staking.staking_reward_asset_symbol || '',
+                            nowBig.toString(),
+                            nowBig.toString(),
+                        ],
+                    );
+                    this.logger.log(`Pending upline payment created for upline ${uplineRow.staking_referral_uid}, amount: ${uplineAmount}`);
+                }
+            } catch (uplineErr) {
+                // Don't fail the main payment if upline record creation fails
+                this.logger.error('Failed to create upline payment record:', uplineErr);
+            }
+
+            // 7. Return updated status
+            const updatedPaidCycles = [...paidCycles, nextCycle];
+            const updatedMaxPaid = nextCycle;
+            const updatedNextCycle = updatedMaxPaid + 1;
+            const updatedIsEligible = completedCycles >= updatedNextCycle;
+
+            const rewardPercentage = settings?.ss_reward_percentage ?? 100;
+            const planAmount = settings?.ss_plan_amount ?? 0;
+            const computedDoublePayment = planAmount * 2 * (rewardPercentage / 100);
+
+            return {
+                payment_cycle: nextCycle,
+                referral_count: referralCount,
+                next_cycle: updatedNextCycle,
+                is_eligible_for_next: updatedIsEligible,
+                paid_cycles: updatedPaidCycles,
+                reward_percentage: rewardPercentage,
+                double_payment_amount: computedDoublePayment,
+            };
+        });
+    }
+
+    // ──────────────────────────────────────────────
+    // STAKING UPLINE PAYMENTS
+    // ──────────────────────────────────────────────
+
+    /**
+     * Get all upline payments, paginated, with optional filters.
+     */
+    async getUplinePayments(
+        offset: number,
+        limit: number,
+        status?: string,
+        planName?: string,
+    ): Promise<{ data: any[]; total: number }> {
+        this.logger.debug(`Fetching upline payments offset=${offset}, limit=${limit}`);
+        try {
+            const conditions: string[] = [];
+            const params: any[] = [];
+
+            if (status) {
+                conditions.push('sup.sup_status = ?');
+                params.push(status);
+            }
+            if (planName) {
+                conditions.push('sup.sup_downline_staking_plan = ?');
+                params.push(planName);
+            }
+
+            const whereClause = conditions.length > 0 ? 'WHERE ' + conditions.join(' AND ') : '';
+
+            const countResult = await this.dataSource.query(
+                `SELECT COUNT(*) as total FROM staking_upline_payments sup ${whereClause}`,
+                [...params],
+            );
+            const total = parseInt(countResult[0].total, 10);
+
+            const query = `
+                SELECT sup.*,
+                       us.staking_wallet_address as upline_wallet_address,
+                       us.staking_reward_chain_id as upline_reward_chain_id,
+                       us.staking_reward_asset_symbol as upline_reward_asset_symbol,
+                       us.staking_reward_asset_name as upline_reward_asset_name,
+                       us.staking_reward_chain_name as upline_reward_chain_name,
+                       us.staking_reward_asset_decimals as upline_reward_asset_decimals,
+                       us.staking_reward_contract as upline_reward_contract,
+                       us.staking_reward_asset_image as upline_reward_asset_image
+                FROM staking_upline_payments sup
+                LEFT JOIN stakings us ON us.staking_id = sup.sup_upline_staking_id
+                ${whereClause}
+                ORDER BY sup.sup_created_at DESC
+                LIMIT ? OFFSET ?
+            `;
+            const results = await this.dataSource.query(query, [...params, limit, offset]);
+
+            return { data: results, total };
+        } catch (err) {
+            this.logger.error('Error fetching upline payments:', err);
+            throw new InternalServerErrorException('Failed to fetch upline payments');
+        }
+    }
+
+    /**
+     * Submit an upline payment (admin pays the upline their 10%).
+     */
+    async submitUplinePayment(dto: SubmitUplinePaymentDto): Promise<any> {
+        this.logger.debug(`Submitting upline payment for sup_id=${dto.sup_id}`);
+
+        // 1. Look up the pending upline payment record
+        const supRows = await this.dataSource.query(
+            `SELECT sup.*, us.staking_wallet_address as upline_wallet_address
+             FROM staking_upline_payments sup
+             LEFT JOIN stakings us ON us.staking_id = sup.sup_upline_staking_id
+             WHERE sup.sup_id = ?`,
+            [dto.sup_id],
+        );
+
+        if (!supRows || supRows.length === 0) {
+            throw new NotFoundException('Upline payment record not found');
+        }
+
+        const supRecord = supRows[0];
+
+        if (supRecord.sup_status === 'confirmed') {
+            throw new BadRequestException('This upline payment has already been confirmed');
+        }
+
+        // 2. Submit on-chain
+        const rpc = NetworkUtils.getRpc(dto.chain_id);
+        const res = await this.submitTransaction(dto.tx_data, rpc);
+        if (!res.status) {
+            throw new UnprocessableEntityException('Transaction submission failed');
+        }
+        const txHash = res.hash;
+
+        // 3. Update the record to confirmed
+        const now = BigInt(Date.now());
+        await this.dataSource.query(
+            `UPDATE staking_upline_payments
+             SET sup_status = 'confirmed', sup_tx_data = ?, sup_tx_hash = ?, sup_chain_id = ?, sup_updated_at = ?
+             WHERE sup_id = ?`,
+            [
+                dto.tx_data || null,
+                txHash || null,
+                dto.chain_id,
+                now.toString(),
+                dto.sup_id,
+            ],
+        );
+
+        this.logger.log(`Upline payment confirmed for sup_id=${dto.sup_id}`);
+
+        // 4. Return updated record
+        const updated = await this.dataSource.query(
+            `SELECT * FROM staking_upline_payments WHERE sup_id = ?`,
+            [dto.sup_id],
+        );
+        return updated[0];
+    }
+
+    // ──────────────────────────────────────────────
+    // SHARED UTILITIES
+    // ──────────────────────────────────────────────
+
+    async submitTransaction( signedTx: string, rpc: string): Promise<{ status: boolean; hash: string | null }> {
+        const provider = new JsonRpcProvider(rpc);
+        const maxAttempts = 3;
+        let txHash=null;
+        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+            try {
+                txHash = await provider.send("eth_sendRawTransaction", [signedTx]);
+                console.log(`Transaction submitted : ${txHash} (attempt ${attempt})`);
+                const receipt = await provider.waitForTransaction(txHash);
+                if (receipt?.status === 1) {
+                    console.log("Transaction SUCCESS");
+                    return { status: true, hash: txHash };
+                } else {
+                    console.log(`Transaction FAILED (attempt ${attempt})`);
+
+                    // fall through to retry if attempts remain
+                }
+            } catch (err) {
+                console.error(`Error submitting transaction (attempt ${attempt}):`, err);
+                provider.destroy();
+                throw new InternalServerErrorException('Failed to submit transaction');
+            }
+
+            if (attempt < maxAttempts) {
+                // simple backoff before retrying
+                await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
+            }
+        }
+
+        console.log(`Transaction submission failed after ${maxAttempts} attempts`);
+        return {
+            status: false,
+            hash: txHash,
+        };
+    }
+
+}
