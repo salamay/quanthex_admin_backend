@@ -975,6 +975,222 @@ export class ProductsService {
     }
 
     // ──────────────────────────────────────────────
+    // TRANSACTION LISTS
+    // ──────────────────────────────────────────────
+
+    /**
+     * Get paginated mining payment transactions with filters.
+     * JOINs to minings + subscriptions for user email, package name, wallet info.
+     */
+    async getMiningPayments(
+        offset: number,
+        limit: number,
+        status?: string,
+        packageName?: string,
+        email?: string,
+        startDate?: number,
+        endDate?: number,
+    ): Promise<{ data: any[]; total: number }> {
+        this.logger.debug(`Fetching mining payments offset=${offset}, limit=${limit}`);
+        try {
+            const conditions: string[] = [];
+            const params: any[] = [];
+
+            if (status) {
+                conditions.push('mp.mp_status = ?');
+                params.push(status);
+            }
+            if (packageName) {
+                conditions.push('s.sub_package_name = ?');
+                params.push(packageName);
+            }
+            if (email) {
+                conditions.push('m.email LIKE ?');
+                params.push(`%${email}%`);
+            }
+            if (startDate) {
+                conditions.push('mp.mp_created_at >= ?');
+                params.push(startDate);
+            }
+            if (endDate) {
+                conditions.push('mp.mp_created_at <= ?');
+                params.push(endDate);
+            }
+
+            const whereClause = conditions.length > 0 ? 'WHERE ' + conditions.join(' AND ') : '';
+
+            const countResult = await this.dataSource.query(
+                `SELECT COUNT(*) as total FROM mining_payments mp
+                 LEFT JOIN minings m ON m.min_id = mp.mp_min_id
+                 LEFT JOIN subscriptions s ON s.sub_id = mp.mp_subscription_id
+                 ${whereClause}`,
+                [...params],
+            );
+            const total = parseInt(countResult[0].total, 10);
+
+            const query = `
+                SELECT mp.*,
+                       m.email as user_email,
+                       m.mining_wallet_address,
+                       m.mining_tag,
+                       s.sub_package_name,
+                       s.sub_reward_asset_symbol,
+                       s.sub_reward_asset_name,
+                       s.sub_reward_chain_id,
+                       s.sub_reward_contract,
+                       s.sub_asset_symbol,
+                       s.sub_price
+                FROM mining_payments mp
+                LEFT JOIN minings m ON m.min_id = mp.mp_min_id
+                LEFT JOIN subscriptions s ON s.sub_id = mp.mp_subscription_id
+                ${whereClause}
+                ORDER BY mp.mp_created_at DESC
+                LIMIT ? OFFSET ?
+            `;
+            const results = await this.dataSource.query(query, [...params, limit, offset]);
+
+            return { data: results, total };
+        } catch (err) {
+            this.logger.error('Error fetching mining payments:', err);
+            throw new InternalServerErrorException('Failed to fetch mining payments');
+        }
+    }
+
+    /**
+     * Get paginated staking payment transactions with filters.
+     * staking_payments already has sp_email and sp_staking_plan denormalized.
+     * JOINs to stakings for wallet and reward asset info.
+     */
+    async getStakingPayments(
+        offset: number,
+        limit: number,
+        status?: string,
+        planName?: string,
+        email?: string,
+        startDate?: number,
+        endDate?: number,
+    ): Promise<{ data: any[]; total: number }> {
+        this.logger.debug(`Fetching staking payments offset=${offset}, limit=${limit}`);
+        try {
+            const conditions: string[] = [];
+            const params: any[] = [];
+
+            if (status) {
+                conditions.push('sp.sp_status = ?');
+                params.push(status);
+            }
+            if (planName) {
+                conditions.push('sp.sp_staking_plan = ?');
+                params.push(planName);
+            }
+            if (email) {
+                conditions.push('sp.sp_email LIKE ?');
+                params.push(`%${email}%`);
+            }
+            if (startDate) {
+                conditions.push('sp.sp_created_at >= ?');
+                params.push(startDate);
+            }
+            if (endDate) {
+                conditions.push('sp.sp_created_at <= ?');
+                params.push(endDate);
+            }
+
+            const whereClause = conditions.length > 0 ? 'WHERE ' + conditions.join(' AND ') : '';
+
+            const countResult = await this.dataSource.query(
+                `SELECT COUNT(*) as total FROM staking_payments sp ${whereClause}`,
+                [...params],
+            );
+            const total = parseInt(countResult[0].total, 10);
+
+            const query = `
+                SELECT sp.*,
+                       st.staking_wallet_address,
+                       st.staking_reward_asset_symbol,
+                       st.staking_reward_asset_name,
+                       st.staking_reward_chain_id,
+                       st.staking_reward_chain_name,
+                       st.staking_reward_contract,
+                       st.staked_amount_fiat,
+                       st.staked_asset_symbol
+                FROM staking_payments sp
+                LEFT JOIN stakings st ON st.staking_id = sp.sp_staking_id
+                ${whereClause}
+                ORDER BY sp.sp_created_at DESC
+                LIMIT ? OFFSET ?
+            `;
+            const results = await this.dataSource.query(query, [...params, limit, offset]);
+
+            return { data: results, total };
+        } catch (err) {
+            this.logger.error('Error fetching staking payments:', err);
+            throw new InternalServerErrorException('Failed to fetch staking payments');
+        }
+    }
+
+    // ──────────────────────────────────────────────
+    // DAILY ROI SETTINGS
+    // ──────────────────────────────────────────────
+
+    /**
+     * Get the global daily ROI settings (single row).
+     */
+    async getDailyRoiSettings(): Promise<any> {
+        const results = await this.dataSource.query(
+            `SELECT * FROM daily_roi_settings LIMIT 1`,
+        );
+        if (!results || results.length === 0) {
+            return null;
+        }
+        return results[0];
+    }
+
+    /**
+     * Update the global daily ROI settings.
+     */
+    async updateDailyRoiSettings(dto: { dr_daily_roi_percentage?: number; dr_is_active?: boolean }): Promise<any> {
+        const existing = await this.dataSource.query(
+            `SELECT * FROM daily_roi_settings LIMIT 1`,
+        );
+        if (!existing || existing.length === 0) {
+            throw new NotFoundException('Daily ROI settings not found. Please run the migration first.');
+        }
+
+        const row = existing[0];
+        const updates: string[] = [];
+        const params: any[] = [];
+
+        if (dto.dr_daily_roi_percentage !== undefined) {
+            updates.push('dr_daily_roi_percentage = ?');
+            params.push(dto.dr_daily_roi_percentage);
+        }
+        if (dto.dr_is_active !== undefined) {
+            updates.push('dr_is_active = ?');
+            params.push(dto.dr_is_active ? 1 : 0);
+        }
+
+        if (updates.length === 0) {
+            return row;
+        }
+
+        updates.push('dr_updated_at = ?');
+        params.push(BigInt(Date.now()).toString());
+        params.push(row.dr_id);
+
+        await this.dataSource.query(
+            `UPDATE daily_roi_settings SET ${updates.join(', ')} WHERE dr_id = ?`,
+            params,
+        );
+
+        const updated = await this.dataSource.query(
+            `SELECT * FROM daily_roi_settings WHERE dr_id = ?`,
+            [row.dr_id],
+        );
+        return updated[0];
+    }
+
+    // ──────────────────────────────────────────────
     // SHARED UTILITIES
     // ──────────────────────────────────────────────
 

@@ -4,6 +4,7 @@ import { SubmitPaymentDto } from './dtos/submit_payment_dto';
 import { SubmitStakingPaymentDto } from './dtos/submit_staking_payment_dto';
 import { SubmitUplinePaymentDto } from './dtos/submit_upline_payment_dto';
 import { UpdateStakingSettingsDto } from './dtos/update_staking_settings_dto';
+import { UpdateDailyRoiDto } from './dtos/update_daily_roi_dto';
 
 @Controller('products')
 export class ProductsController {
@@ -156,5 +157,91 @@ export class ProductsController {
             throw new UnauthorizedException('Missing user id on request');
         }
         return await this.productsService.submitUplinePayment(dto);
+    }
+
+    // ──────────────────────────────────────────────
+    // TRANSACTION LIST ENDPOINTS
+    // ──────────────────────────────────────────────
+
+    @Get('mining-payments')
+    async getMiningPayments(
+        @Request() req,
+        @Query('offset') offset: string = '0',
+        @Query('limit') limit: string = '20',
+        @Query('status') status?: string,
+        @Query('packageName') packageName?: string,
+        @Query('email') email?: string,
+        @Query('startDate') startDate?: string,
+        @Query('endDate') endDate?: string,
+    ): Promise<any> {
+        const uid = req.user?.uid;
+        if (!uid) {
+            throw new UnauthorizedException('Missing user id on request');
+        }
+        const parsedOffset = parseInt(offset, 10) || 0;
+        const parsedLimit = Math.min(parseInt(limit, 10) || 20, 100);
+        const parsedStartDate = startDate ? parseInt(startDate, 10) : undefined;
+        const parsedEndDate = endDate ? parseInt(endDate, 10) : undefined;
+        return await this.productsService.getMiningPayments(
+            parsedOffset,
+            parsedLimit,
+            status,
+            packageName,
+            email,
+            parsedStartDate,
+            parsedEndDate,
+        );
+    }
+
+    @Get('staking-payments')
+    async getStakingPayments(
+        @Request() req,
+        @Query('offset') offset: string = '0',
+        @Query('limit') limit: string = '20',
+        @Query('status') status?: string,
+        @Query('planName') planName?: string,
+        @Query('email') email?: string,
+        @Query('startDate') startDate?: string,
+        @Query('endDate') endDate?: string,
+    ): Promise<any> {
+        const uid = req.user?.uid;
+        if (!uid) {
+            throw new UnauthorizedException('Missing user id on request');
+        }
+        const parsedOffset = parseInt(offset, 10) || 0;
+        const parsedLimit = Math.min(parseInt(limit, 10) || 20, 100);
+        const parsedStartDate = startDate ? parseInt(startDate, 10) : undefined;
+        const parsedEndDate = endDate ? parseInt(endDate, 10) : undefined;
+        return await this.productsService.getStakingPayments(
+            parsedOffset,
+            parsedLimit,
+            status,
+            planName,
+            email,
+            parsedStartDate,
+            parsedEndDate,
+        );
+    }
+
+    // ──────────────────────────────────────────────
+    // DAILY ROI SETTINGS ENDPOINTS
+    // ──────────────────────────────────────────────
+
+    @Get('daily-roi-settings')
+    async getDailyRoiSettings(@Request() req): Promise<any> {
+        const uid = req.user?.uid;
+        if (!uid) {
+            throw new UnauthorizedException('Missing user id on request');
+        }
+        return await this.productsService.getDailyRoiSettings();
+    }
+
+    @Put('daily-roi-settings')
+    async updateDailyRoiSettings(@Request() req, @Body() dto: UpdateDailyRoiDto): Promise<any> {
+        const uid = req.user?.uid;
+        if (!uid) {
+            throw new UnauthorizedException('Missing user id on request');
+        }
+        return await this.productsService.updateDailyRoiSettings(dto);
     }
 }

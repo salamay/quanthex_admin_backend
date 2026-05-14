@@ -10,6 +10,7 @@ import { StakingReferralsEntity } from './entities/staking_referrals_entity';
 import { StakingPaymentEntity } from './entities/staking_payment_entity';
 import { StakingSettingsEntity } from './entities/staking_settings_entity';
 import { StakingUplinePaymentEntity } from './entities/staking_upline_payment_entity';
+import { DailyRoiSettingsEntity } from './entities/daily_roi_settings_entity';
 
 @Module({
     imports: [
@@ -17,6 +18,7 @@ import { StakingUplinePaymentEntity } from './entities/staking_upline_payment_en
             MiningEntity, SubscriptionEntity, MiningPaymentEntity,
             StakingEntity, StakingReferralsEntity, StakingPaymentEntity, StakingSettingsEntity,
             StakingUplinePaymentEntity,
+            DailyRoiSettingsEntity,
         ]),
     ],
     controllers: [ProductsController],
