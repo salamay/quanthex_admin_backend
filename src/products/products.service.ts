@@ -9,6 +9,7 @@ import { SubmitPaymentDto } from './dtos/submit_payment_dto';
 import { SubmitStakingPaymentDto } from './dtos/submit_staking_payment_dto';
 import { SubmitUplinePaymentDto } from './dtos/submit_upline_payment_dto';
 import { UpdateStakingSettingsDto } from './dtos/update_staking_settings_dto';
+import { SubmitDailyRoiPaymentDto } from './dtos/submit_daily_roi_payment_dto';
 import { JsonRpcProvider } from 'ethers';
 import { NetworkUtils } from 'src/utils/network_utils';
 import { stat } from 'fs';
@@ -87,9 +88,9 @@ export class ProductsService {
             const directCountMap = await this.getMiningDirectReferralCounts(uids, subIds);
             const indirectCountMap = await this.getMiningIndirectReferralCounts(uids, subIds);
 
-            // Batch fetch payment status for all minings in this page
+            // Batch fetch payment counts for all minings in this page
             const minIds = results.map((row: any) => row.min_id).filter(Boolean);
-            const paidTiersMap = await this.getBatchPaymentStatus(minIds);
+            const paymentCountMap = await this.getBatchPaymentCounts(minIds);
 
             const makeKey = (uid: string, subId: string) => `${uid}::${subId}`;
             const data = results.map((row: any) => {
@@ -99,15 +100,9 @@ export class ProductsService {
                 const indirectCount = indirectCountMap.get(key) || 0;
                 const earnings = EarningCalculator.calcTotalEarning(pkg, directCount, indirectCount);
 
-                // Calculate payment eligibility from paid tiers + direct referral count
-                const paidTiers = paidTiersMap.get(row.min_id) || [];
-                let nextTier: number | null = null;
-                for (const tier of ProductsService.PAYMENT_TIERS) {
-                    if (!paidTiers.includes(tier) && directCount >= tier) {
-                        nextTier = tier;
-                        break;
-                    }
-                }
+                // Per-referral eligibility: eligible if referrals > payments
+                const totalPayments = paymentCountMap.get(row.min_id) || 0;
+                const isEligible = directCount > totalPayments;
 
                 return {
                     mining: {
@@ -154,9 +149,9 @@ export class ProductsService {
                     indirect_referral_count: indirectCount,
                     earnings,
                     payment_status: {
-                        paid_tiers: paidTiers,
-                        next_tier: nextTier,
-                        is_eligible_for_payment: nextTier !== null,
+                        total_payments: totalPayments,
+                        next_payment_number: isEligible ? totalPayments + 1 : null,
+                        is_eligible_for_payment: isEligible,
                     },
                 };
             });
@@ -302,41 +297,34 @@ export class ProductsService {
     }
 
     // ──────────────────────────────────────────────
-    // Payment tier system: 6^1=6, 6^2=36, 6^3=216, 6^4=1296
+    // Per-referral payment system: 1 referral = 1 payment eligibility
     // ──────────────────────────────────────────────
 
-    static readonly PAYMENT_TIERS = [6, 36, 216, 1296];
-
     /**
-     * Get the next unpaid tier for a mining based on direct referral count
-     * and existing payment records.
+     * Get payment status for a mining.
+     * A user is eligible for payment when their direct referral count
+     * exceeds their total confirmed payments.
      */
     async getPaymentStatus(minId: string, uid: string, subscriptionId: string, directReferralCount: number): Promise<{
-        paidTiers: number[];
-        nextTier: number | null;
+        totalPayments: number;
+        nextPaymentNumber: number | null;
         isEligibleForPayment: boolean;
     }> {
-        // Get all existing payments for this mining
-        const payments = await this.dataSource.query(
-            `SELECT mp_payment_tier, mp_status FROM mining_payments WHERE mp_min_id = ? AND mp_status = 'confirmed' ORDER BY mp_payment_tier ASC`,
+        // Count confirmed non-manual payments for this mining
+        const result = await this.dataSource.query(
+            `SELECT COUNT(*) as cnt FROM mining_payments WHERE mp_min_id = ? AND mp_status = 'confirmed' AND mp_is_manual = 0`,
             [minId],
         );
+        const totalPayments = parseInt(result[0]?.cnt || '0', 10);
 
-        const paidTiers = payments.map((p: any) => p.mp_payment_tier);
-
-        // Find the next unpaid tier that the user qualifies for
-        let nextTier: number | null = null;
-        for (const tier of ProductsService.PAYMENT_TIERS) {
-            if (!paidTiers.includes(tier) && directReferralCount >= tier) {
-                nextTier = tier;
-                break;
-            }
-        }
+        // Eligible if referrals > payments made
+        const isEligible = directReferralCount > totalPayments;
+        const nextPaymentNumber = isEligible ? totalPayments + 1 : null;
 
         return {
-            paidTiers,
-            nextTier,
-            isEligibleForPayment: nextTier !== null,
+            totalPayments,
+            nextPaymentNumber,
+            isEligibleForPayment: isEligible,
         };
     }
 
@@ -374,7 +362,7 @@ export class ProductsService {
             );
             const directCount = directCountMap.get(`${mining.uid}::${mining.sub_id}`) || 0;
 
-            // 3. Determine payment status and next eligible tier
+            // 3. Determine payment status (per-referral: eligible if referrals > payments)
             const paymentStatus = await this.getPaymentStatus(
                 dto.min_id,
                 mining.uid,
@@ -382,13 +370,13 @@ export class ProductsService {
                 directCount,
             );
 
-            if (!paymentStatus.isEligibleForPayment || paymentStatus.nextTier === null) {
+            if (!paymentStatus.isEligibleForPayment || paymentStatus.nextPaymentNumber === null) {
                 throw new BadRequestException(
-                    `Mining is not eligible for payment. Direct referrals: ${directCount}, paid tiers: [${paymentStatus.paidTiers.join(', ')}]`,
+                    `Mining is not eligible for payment. Direct referrals: ${directCount}, total payments: ${paymentStatus.totalPayments}`,
                 );
             }
 
-            // 4. Insert payment record
+            // 4. Insert payment record (mp_payment_tier stores sequential payment number)
             const now = BigInt(Date.now());
             await this.dataSource.query(
                 `INSERT INTO mining_payments (mp_id, mp_min_id, mp_uid, mp_subscription_id, mp_tx_hash, mp_tx_data, mp_amount, mp_chain_id, mp_reward_symbol, mp_payment_tier, mp_referral_count_at_payment, mp_status, mp_created_at, mp_updated_at)
@@ -402,16 +390,16 @@ export class ProductsService {
                     dto.amount,
                     dto.chain_id,
                     dto.reward_symbol || mining.sub_reward_asset_symbol || '',
-                    paymentStatus.nextTier,
+                    paymentStatus.nextPaymentNumber,
                     directCount,
                     now.toString(),
                     now.toString(),
                 ],
             );
 
-            this.logger.log(`Payment recorded for mining ${dto.min_id} at tier ${paymentStatus.nextTier}`);
+            this.logger.log(`Payment #${paymentStatus.nextPaymentNumber} recorded for mining ${dto.min_id}`);
 
-            // 6. Recalculate next tier after this payment
+            // 5. Recalculate status after this payment
             const updatedStatus = await this.getPaymentStatus(
                 dto.min_id,
                 mining.uid,
@@ -420,36 +408,106 @@ export class ProductsService {
             );
 
             return {
-                payment_tier: paymentStatus.nextTier,
+                payment_number: paymentStatus.nextPaymentNumber,
                 referral_count: directCount,
-                next_tier: updatedStatus.nextTier,
+                total_payments: updatedStatus.totalPayments,
                 is_eligible_for_next: updatedStatus.isEligibleForPayment,
-                paid_tiers: updatedStatus.paidTiers,
+                next_payment_number: updatedStatus.nextPaymentNumber,
             };
         });
     }
 
     /**
-     * Batch fetch paid tiers for multiple mining IDs.
-     * Returns a Map<min_id, number[]> of confirmed payment tiers.
+     * Submit a manual payment for a mining (no eligibility check).
+     * Admin can send any amount of DOGE to the user.
      */
-    async getBatchPaymentStatus(minIds: string[]): Promise<Map<string, number[]>> {
-        const paidMap = new Map<string, number[]>();
-        if (minIds.length === 0) return paidMap;
+    async submitManualPayment(dto: SubmitPaymentDto): Promise<any> {
+        this.logger.debug(`Submitting manual payment for mining ${dto.min_id} with amount ${dto.amount}`);
+        const rpc = NetworkUtils.getRpc(dto.chain_id);
+        const res: { status: boolean; hash: string | null } = await this.submitTransaction(dto.tx_data, rpc);
+        if (!res.status) {
+            throw new UnprocessableEntityException('Transaction submission failed');
+        }
+        const txHash = res.hash;
+
+        // Look up the mining record
+        const miningRows = await this.dataSource.query(
+            `SELECT m.*, s.sub_id, s.sub_package_name, s.sub_reward_asset_symbol
+             FROM minings m
+             LEFT JOIN subscriptions s ON s.sub_id = m.min_subscription_id
+             WHERE m.min_id = ?`,
+            [dto.min_id],
+        );
+
+        if (!miningRows || miningRows.length === 0) {
+            throw new BadRequestException('Mining record not found');
+        }
+
+        const mining = miningRows[0];
+
+        // Get current referral count (for record-keeping)
+        const directCountMap = await this.getMiningDirectReferralCounts(
+            [mining.uid],
+            [mining.sub_id],
+        );
+        const directCount = directCountMap.get(`${mining.uid}::${mining.sub_id}`) || 0;
+
+        // Count total manual payments for numbering
+        const manualCountResult = await this.dataSource.query(
+            `SELECT COUNT(*) as cnt FROM mining_payments WHERE mp_min_id = ? AND mp_is_manual = 1`,
+            [dto.min_id],
+        );
+        const manualPaymentNumber = parseInt(manualCountResult[0]?.cnt || '0', 10) + 1;
+
+        // Insert manual payment record
+        const now = BigInt(Date.now());
+        await this.dataSource.query(
+            `INSERT INTO mining_payments (mp_id, mp_min_id, mp_uid, mp_subscription_id, mp_tx_hash, mp_tx_data, mp_amount, mp_chain_id, mp_reward_symbol, mp_payment_tier, mp_referral_count_at_payment, mp_is_manual, mp_status, mp_created_at, mp_updated_at)
+             VALUES (UUID(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 'confirmed', ?, ?)`,
+            [
+                dto.min_id,
+                mining.uid,
+                mining.sub_id,
+                txHash || null,
+                dto.tx_data || null,
+                dto.amount,
+                dto.chain_id,
+                dto.reward_symbol || mining.sub_reward_asset_symbol || '',
+                manualPaymentNumber,
+                directCount,
+                now.toString(),
+                now.toString(),
+            ],
+        );
+
+        this.logger.log(`Manual payment #${manualPaymentNumber} recorded for mining ${dto.min_id}`);
+
+        return {
+            manual_payment_number: manualPaymentNumber,
+            amount: dto.amount,
+            tx_hash: txHash,
+        };
+    }
+
+    /**
+     * Batch fetch confirmed payment counts for multiple mining IDs.
+     * Returns a Map<min_id, number> of confirmed payment counts.
+     */
+    async getBatchPaymentCounts(minIds: string[]): Promise<Map<string, number>> {
+        const countMap = new Map<string, number>();
+        if (minIds.length === 0) return countMap;
 
         const placeholders = minIds.map(() => '?').join(', ');
-        const payments = await this.dataSource.query(
-            `SELECT mp_min_id, mp_payment_tier FROM mining_payments WHERE mp_min_id IN (${placeholders}) AND mp_status = 'confirmed'`,
+        const results = await this.dataSource.query(
+            `SELECT mp_min_id, COUNT(*) as cnt FROM mining_payments WHERE mp_min_id IN (${placeholders}) AND mp_status = 'confirmed' AND mp_is_manual = 0 GROUP BY mp_min_id`,
             minIds,
         );
 
-        for (const p of payments) {
-            const list = paidMap.get(p.mp_min_id) || [];
-            list.push(p.mp_payment_tier);
-            paidMap.set(p.mp_min_id, list);
+        for (const r of results) {
+            countMap.set(r.mp_min_id, parseInt(r.cnt, 10));
         }
 
-        return paidMap;
+        return countMap;
     }
 
     // ──────────────────────────────────────────────
@@ -1188,6 +1246,262 @@ export class ProductsService {
             [row.dr_id],
         );
         return updated[0];
+    }
+
+    // ──────────────────────────────────────────────
+    // DAILY ROI PAYMENTS
+    // ──────────────────────────────────────────────
+
+    /**
+     * Get all active, non-expired stakings eligible for today's daily ROI payment.
+     * Returns stakings that have NOT already been paid for today.
+     */
+    async getDailyRoiEligibleStakings(): Promise<{ eligible: any[]; alreadyPaid: any[]; roiPercentage: number; totalPayoutToday: number }> {
+        console.log('Calculating daily ROI eligible stakings...');
+        // 1. Get current daily ROI percentage
+        const roiSettings = await this.getDailyRoiSettings();
+        if (!roiSettings || !roiSettings.dr_is_active) {
+            return { eligible: [], alreadyPaid: [], roiPercentage: 0, totalPayoutToday: 0 };
+        }
+        const roiPercentage = parseFloat(roiSettings.dr_daily_roi_percentage);
+
+        // 2. Today's date string (YYYY-MM-DD)
+        const today = new Date().toISOString().split('T')[0];
+        const nowMillis = Date.now();
+
+        // 3. Get all active, non-expired stakings
+        const stakings = await this.dataSource.query(
+            `SELECT st.* FROM stakings st
+             WHERE st.staking_status = 'active'
+             AND st.end_date > ?
+             ORDER BY st.stake_created_at DESC`,
+            [nowMillis],
+        );
+        console.log(`Found ${stakings.length} active, non-expired stakings for daily ROI check.`);
+
+        // 4. Get today's already-paid staking IDs
+        const paidToday = await this.dataSource.query(
+            `SELECT drp.drp_staking_id, drp.drp_payout_amount, drp.drp_status
+             FROM daily_roi_payments drp
+             WHERE drp.drp_payment_date = ?`,
+            [today],
+        );
+        const paidMap = new Map<string, any>();
+        for (const p of paidToday) {
+            paidMap.set(p.drp_staking_id, p);
+        }
+
+        const eligible: any[] = [];
+        const alreadyPaid: any[] = [];
+        let totalPayoutToday = 0;
+
+        for (const st of stakings) {
+            const stakedAmount = parseFloat(st.staked_amount_fiat) || 0;
+            const payoutAmount = stakedAmount * (roiPercentage / 100);
+
+            const entry = {
+                staking_id: st.staking_id,
+                uid: st.uid,
+                email: st.email,
+                staking_plan: st.staking_plan,
+                staked_amount_fiat: stakedAmount,
+                staking_wallet_address: st.staking_wallet_address,
+                staking_reward_asset_symbol: st.staking_reward_asset_symbol,
+                staking_reward_chain_id: st.staking_reward_chain_id,
+                payout_amount: payoutAmount,
+            };
+
+            if (paidMap.has(st.staking_id)) {
+                alreadyPaid.push({ ...entry, status: paidMap.get(st.staking_id).drp_status });
+                totalPayoutToday += payoutAmount;
+            } else {
+                eligible.push(entry);
+            }
+        }
+        console.log(`Eligible for daily ROI payment: ${eligible.length}, Already paid today: ${alreadyPaid.length}, Total payout today: ${totalPayoutToday.toFixed(2)}`);
+
+        return { eligible, alreadyPaid, roiPercentage, totalPayoutToday };
+    }
+
+    /**
+     * Pay daily ROI for a single staking.
+     */
+    async payDailyRoi(dto: SubmitDailyRoiPaymentDto): Promise<any> {
+        const { staking_id: stakingId, tx_data, chain_id } = dto;
+
+        // 1. Get ROI settings
+        const roiSettings = await this.getDailyRoiSettings();
+        if (!roiSettings || !roiSettings.dr_is_active) {
+            throw new BadRequestException('Daily ROI is not active.');
+        }
+        const roiPercentage = parseFloat(roiSettings.dr_daily_roi_percentage);
+
+        // 2. Today's date
+        const today = new Date().toISOString().split('T')[0];
+        const nowMillis = Date.now();
+
+        // 3. Check if already paid today
+        const existing = await this.dataSource.query(
+            `SELECT * FROM daily_roi_payments WHERE drp_staking_id = ? AND drp_payment_date = ?`,
+            [stakingId, today],
+        );
+        if (existing && existing.length > 0) {
+            throw new BadRequestException('This staking has already been paid for today.');
+        }
+
+        // 4. Get the staking
+        const stakingResult = await this.dataSource.query(
+            `SELECT * FROM stakings WHERE staking_id = ?`,
+            [stakingId],
+        );
+        if (!stakingResult || stakingResult.length === 0) {
+            throw new NotFoundException('Staking not found.');
+        }
+        const staking = stakingResult[0];
+
+        // 5. Validate active & not expired
+        if (staking.staking_status !== 'active') {
+            throw new BadRequestException('Staking is not active.');
+        }
+        const endDate = typeof staking.end_date === 'string' ? parseInt(staking.end_date, 10) : Number(staking.end_date);
+        if (endDate > 0 && nowMillis > endDate) {
+            throw new BadRequestException('Staking has expired.');
+        }
+
+        // 6. Submit transaction on-chain
+        const rpc = NetworkUtils.getRpc(chain_id);
+        const res = await this.submitTransaction(tx_data, rpc);
+        if (!res.status) {
+            throw new UnprocessableEntityException('Transaction submission failed');
+        }
+        const txHash = res.hash;
+
+        // 7. Calculate payout
+        const stakedAmount = parseFloat(staking.staked_amount_fiat) || 0;
+        const payoutAmount = stakedAmount * (roiPercentage / 100);
+
+        // 8. Insert payment record as confirmed
+        const nowBig = BigInt(Date.now()).toString();
+        try {
+                        await this.dataSource.query(
+            `INSERT INTO daily_roi_payments
+             (drp_id, drp_staking_id, drp_uid, drp_email, drp_staking_plan,
+              drp_staked_amount, drp_roi_percentage, drp_payout_amount, drp_payment_date,
+              drp_chain_id, drp_reward_symbol, drp_wallet_address, drp_tx_data, drp_tx_hash,
+              drp_status, drp_created_at, drp_updated_at)
+             VALUES (UUID(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'confirmed', ?, ?)`,
+            [
+                stakingId,
+                staking.uid,
+                staking.email,
+                staking.staking_plan,
+                stakedAmount,
+                roiPercentage,
+                payoutAmount,
+                today,
+                chain_id,
+                staking.staking_reward_asset_symbol || null,
+                staking.staking_wallet_address || null,
+                tx_data || null,
+                txHash || null,
+                nowBig,
+                nowBig,
+            ],
+        );
+
+        }catch (err) {
+            this.logger.error('Error inserting daily ROI payment record:', err);
+            throw new InternalServerErrorException('Failed to record daily ROI payment');
+        }
+       
+        this.logger.log(`Daily ROI payment confirmed for staking ${stakingId}, txHash: ${txHash}`);
+
+        // 9. Return the created record
+        const created = await this.dataSource.query(
+            `SELECT * FROM daily_roi_payments WHERE drp_staking_id = ? AND drp_payment_date = ?`,
+            [stakingId, today],
+        );
+        return created[0];
+    }
+
+    /**
+     * Pay daily ROI for ALL eligible stakings at once.
+     * Each item must include a signed transaction (tx_data) and chain_id.
+     */
+    async payAllDailyRoi(items: SubmitDailyRoiPaymentDto[]): Promise<{ paid: number; failed: number; totalPayout: number; results: any[] }> {
+        if (!items || items.length === 0) {
+            return { paid: 0, failed: 0, totalPayout: 0, results: [] };
+        }
+
+        let paid = 0;
+        let failed = 0;
+        let totalPayout = 0;
+        const results: any[] = [];
+
+        for (const item of items) {
+            try {
+                const result = await this.payDailyRoi(item);
+                paid++;
+                totalPayout += parseFloat(result.drp_payout_amount) || 0;
+                results.push({ staking_id: item.staking_id, status: 'confirmed', result });
+            } catch (e:any) {
+                failed++;
+                results.push({ staking_id: item.staking_id, status: 'failed', error: e.message || 'Unknown error' });
+            }
+        }
+
+        return { paid, failed, totalPayout, results };
+    }
+
+    /**
+     * Get paginated daily ROI payment history.
+     */
+    async getDailyRoiPayments(
+        offset: number,
+        limit: number,
+        status?: string,
+        email?: string,
+        paymentDate?: string,
+    ): Promise<{ data: any[]; total: number }> {
+        const conditions: string[] = [];
+        const params: any[] = [];
+
+        try {
+if (status) {
+            conditions.push('drp.drp_status = ?');
+            params.push(status);
+        }
+        if (email) {
+            conditions.push('drp.drp_email LIKE ?');
+            params.push(`%${email}%`);
+        }
+        if (paymentDate) {
+            conditions.push('drp.drp_payment_date = ?');
+            params.push(paymentDate);
+        }
+
+        const whereClause = conditions.length > 0 ? 'WHERE ' + conditions.join(' AND ') : '';
+
+        const countResult = await this.dataSource.query(
+            `SELECT COUNT(*) as total FROM daily_roi_payments drp ${whereClause}`,
+            [...params],
+        );
+        const total = parseInt(countResult[0].total, 10);
+
+        const data = await this.dataSource.query(
+            `SELECT drp.* FROM daily_roi_payments drp
+             ${whereClause}
+             ORDER BY drp.drp_created_at DESC
+             LIMIT ? OFFSET ?`,
+            [...params, limit, offset],
+        );
+
+        return { data, total };
+        } catch (err) {
+            this.logger.error('Error fetching daily ROI payments:', err);
+            throw new InternalServerErrorException('Failed to fetch daily ROI payments');
+        }
+        
     }
 
     // ──────────────────────────────────────────────

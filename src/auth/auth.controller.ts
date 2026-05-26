@@ -11,7 +11,6 @@ export class AuthController {
         if (!loginBody.email || !loginBody.password) {
             throw new UnprocessableEntityException('Email and password are required');
         }
-    
         return await this.authService.signIn(loginBody);
     }
     

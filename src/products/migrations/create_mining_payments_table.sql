@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS `mining_payments` (
   `mp_reward_symbol` VARCHAR(50) DEFAULT NULL,
   `mp_payment_tier` INT NOT NULL COMMENT 'Payment tier: 6, 36, 216, or 1296',
   `mp_referral_count_at_payment` INT NOT NULL,
+  `mp_is_manual` TINYINT NOT NULL DEFAULT 0 COMMENT '0 = referral-based, 1 = manual payment',
   `mp_status` VARCHAR(20) NOT NULL DEFAULT 'pending' COMMENT 'pending | confirmed | failed',
   `mp_created_at` BIGINT NOT NULL,
   `mp_updated_at` BIGINT NOT NULL,

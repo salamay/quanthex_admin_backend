@@ -1,10 +1,11 @@
-import { Controller, Get, Post, Put, Body, Query, Request, UnauthorizedException } from '@nestjs/common';
+import { Controller, Get, Post, Put, Body, Query, Request, UnauthorizedException, BadRequestException } from '@nestjs/common';
 import { ProductsService } from './products.service';
 import { SubmitPaymentDto } from './dtos/submit_payment_dto';
 import { SubmitStakingPaymentDto } from './dtos/submit_staking_payment_dto';
 import { SubmitUplinePaymentDto } from './dtos/submit_upline_payment_dto';
 import { UpdateStakingSettingsDto } from './dtos/update_staking_settings_dto';
 import { UpdateDailyRoiDto } from './dtos/update_daily_roi_dto';
+import { SubmitDailyRoiPaymentDto } from './dtos/submit_daily_roi_payment_dto';
 
 @Controller('products')
 export class ProductsController {
@@ -63,6 +64,15 @@ export class ProductsController {
             throw new UnauthorizedException('Missing user id on request');
         }
         return await this.productsService.submitPayment(dto);
+    }
+
+    @Post("manual-mining-payment")
+    async submitManualPayment(@Request() req, @Body() dto: SubmitPaymentDto): Promise<any> {
+        const uid = req.user?.uid;
+        if (!uid) {
+            throw new UnauthorizedException('Missing user id on request');
+        }
+        return await this.productsService.submitManualPayment(dto);
     }
 
     // ──────────────────────────────────────────────
@@ -243,5 +253,72 @@ export class ProductsController {
             throw new UnauthorizedException('Missing user id on request');
         }
         return await this.productsService.updateDailyRoiSettings(dto);
+    }
+
+    // ──────────────────────────────────────────────
+    // DAILY ROI PAYMENTS ENDPOINTS
+    // ──────────────────────────────────────────────
+
+    @Get('daily-roi-eligible')
+    async getDailyRoiEligible(@Request() req): Promise<any> {
+        const uid = req.user?.uid;
+        if (!uid) {
+            throw new UnauthorizedException('Missing user id on request');
+        }
+        return await this.productsService.getDailyRoiEligibleStakings();
+    }
+
+    @Post('daily-roi-pay')
+    async payDailyRoi(@Request() req, @Body() dto: SubmitDailyRoiPaymentDto): Promise<any> {
+        const uid = req.user?.uid;
+        if (!uid) {
+            throw new UnauthorizedException('Missing user id on request');
+        }
+        if (!dto.staking_id) {
+            throw new BadRequestException('staking_id is required');
+        }
+        if (!dto.tx_data) {
+            throw new BadRequestException('tx_data is required');
+        }
+        if (!dto.chain_id) {
+            throw new BadRequestException('chain_id is required');
+        }
+        return await this.productsService.payDailyRoi(dto);
+    }
+
+    @Post('daily-roi-pay-all')
+    async payAllDailyRoi(@Request() req, @Body() body: { items: SubmitDailyRoiPaymentDto[] }): Promise<any> {
+        const uid = req.user?.uid;
+        if (!uid) {
+            throw new UnauthorizedException('Missing user id on request');
+        }
+        if (!body.items || !Array.isArray(body.items) || body.items.length === 0) {
+            throw new BadRequestException('items array is required and must not be empty');
+        }
+        return await this.productsService.payAllDailyRoi(body.items);
+    }
+
+    @Get('daily-roi-payments')
+    async getDailyRoiPayments(
+        @Request() req,
+        @Query('offset') offset: string = '0',
+        @Query('limit') limit: string = '20',
+        @Query('status') status?: string,
+        @Query('email') email?: string,
+        @Query('paymentDate') paymentDate?: string,
+    ): Promise<any> {
+        const uid = req.user?.uid;
+        if (!uid) {
+            throw new UnauthorizedException('Missing user id on request');
+        }
+        const parsedOffset = parseInt(offset, 10) || 0;
+        const parsedLimit = Math.min(parseInt(limit, 10) || 20, 100);
+        return await this.productsService.getDailyRoiPayments(
+            parsedOffset,
+            parsedLimit,
+            status,
+            email,
+            paymentDate,
+        );
     }
 }
