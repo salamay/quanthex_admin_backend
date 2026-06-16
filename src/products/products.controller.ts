@@ -183,6 +183,7 @@ export class ProductsController {
         @Query('email') email?: string,
         @Query('startDate') startDate?: string,
         @Query('endDate') endDate?: string,
+        @Query('minId') minId?: string,
     ): Promise<any> {
         const uid = req.user?.uid;
         if (!uid) {
@@ -200,6 +201,7 @@ export class ProductsController {
             email,
             parsedStartDate,
             parsedEndDate,
+            minId,
         );
     }
 

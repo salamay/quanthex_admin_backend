@@ -1048,12 +1048,17 @@ export class ProductsService {
         email?: string,
         startDate?: number,
         endDate?: number,
+        minId?: string,
     ): Promise<{ data: any[]; total: number }> {
         this.logger.debug(`Fetching mining payments offset=${offset}, limit=${limit}`);
         try {
             const conditions: string[] = [];
             const params: any[] = [];
 
+            if (minId) {
+                conditions.push('mp.mp_min_id = ?');
+                params.push(minId);
+            }
             if (status) {
                 conditions.push('mp.mp_status = ?');
                 params.push(status);
