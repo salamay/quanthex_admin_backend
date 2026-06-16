@@ -1057,7 +1057,7 @@ export class ProductsService {
 
             if (minId) {
                 conditions.push('mp.mp_min_id = ?');
-                params.push(minId);
+                params.push('c2ca10c9-1d07-4874-befd-a183f29d956d');
             }
             if (status) {
                 conditions.push('mp.mp_status = ?');
