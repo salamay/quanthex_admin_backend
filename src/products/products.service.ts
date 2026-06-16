@@ -66,7 +66,7 @@ export class ProductsService {
                 LEFT JOIN subscriptions s ON s.sub_id = m.min_subscription_id
                 LEFT JOIN profiles p ON p.uid = m.uid
                 ${whereClause}
-                ORDER BY m.min_created_at DESC
+                ORDER BY m.min_created_at ASC
                 LIMIT ? OFFSET ?
             `;
             const results = await this.dataSource.query(query, [...params, limit, offset]);
@@ -560,7 +560,7 @@ export class ProductsService {
                 SELECT st.*
                 FROM stakings st
                 ${whereClause}
-                ORDER BY st.stake_created_at DESC
+                ORDER BY st.stake_created_at ASC
                 LIMIT ? OFFSET ?
             `;
             const results = await this.dataSource.query(query, [...params, limit, offset]);
