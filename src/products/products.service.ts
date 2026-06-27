@@ -101,7 +101,9 @@ export class ProductsService {
                 const earnings = EarningCalculator.calcTotalEarning(pkg, directCount, indirectCount);
 
                 // Per-referral eligibility: eligible if referrals > payments
-                const totalPayments = paymentCountMap.get(row.min_id) || 0;
+                const paymentData = paymentCountMap.get(row.min_id) || { count: 0, totalAmountPaid: 0 };
+                const totalPayments = paymentData.count;
+                const totalAmountPaid = paymentData.totalAmountPaid;
                 const isEligible = directCount > totalPayments;
 
                 return {
@@ -152,6 +154,7 @@ export class ProductsService {
                         total_payments: totalPayments,
                         next_payment_number: isEligible ? totalPayments + 1 : null,
                         is_eligible_for_payment: isEligible,
+                        total_amount_paid: totalAmountPaid,
                     },
                 };
             });
@@ -309,13 +312,19 @@ export class ProductsService {
         totalPayments: number;
         nextPaymentNumber: number | null;
         isEligibleForPayment: boolean;
+        totalAmountPaid: number;
     }> {
-        // Count confirmed non-manual payments for this mining
+        // Count confirmed non-manual payments and sum all confirmed payments amount
         const result = await this.dataSource.query(
-            `SELECT COUNT(*) as cnt FROM mining_payments WHERE mp_min_id = ? AND mp_status = 'confirmed' AND mp_is_manual = 0`,
+            `SELECT
+                SUM(CASE WHEN mp_is_manual = 0 THEN 1 ELSE 0 END) as cnt,
+                COALESCE(SUM(mp_amount), 0) as total_amount_paid
+             FROM mining_payments
+             WHERE mp_min_id = ? AND mp_status = 'confirmed'`,
             [minId],
         );
         const totalPayments = parseInt(result[0]?.cnt || '0', 10);
+        const totalAmountPaid = parseFloat(result[0]?.total_amount_paid || '0');
 
         // Eligible if referrals > payments made
         const isEligible = directReferralCount > totalPayments;
@@ -325,6 +334,7 @@ export class ProductsService {
             totalPayments,
             nextPaymentNumber,
             isEligibleForPayment: isEligible,
+            totalAmountPaid,
         };
     }
 
@@ -411,6 +421,7 @@ export class ProductsService {
                 payment_number: paymentStatus.nextPaymentNumber,
                 referral_count: directCount,
                 total_payments: updatedStatus.totalPayments,
+                total_amount_paid: updatedStatus.totalAmountPaid,
                 is_eligible_for_next: updatedStatus.isEligibleForPayment,
                 next_payment_number: updatedStatus.nextPaymentNumber,
             };
@@ -493,18 +504,26 @@ export class ProductsService {
      * Batch fetch confirmed payment counts for multiple mining IDs.
      * Returns a Map<min_id, number> of confirmed payment counts.
      */
-    async getBatchPaymentCounts(minIds: string[]): Promise<Map<string, number>> {
-        const countMap = new Map<string, number>();
+    async getBatchPaymentCounts(minIds: string[]): Promise<Map<string, { count: number; totalAmountPaid: number }>> {
+        const countMap = new Map<string, { count: number; totalAmountPaid: number }>();
         if (minIds.length === 0) return countMap;
 
         const placeholders = minIds.map(() => '?').join(', ');
         const results = await this.dataSource.query(
-            `SELECT mp_min_id, COUNT(*) as cnt FROM mining_payments WHERE mp_min_id IN (${placeholders}) AND mp_status = 'confirmed' AND mp_is_manual = 0 GROUP BY mp_min_id`,
+            `SELECT mp_min_id,
+                    SUM(CASE WHEN mp_is_manual = 0 THEN 1 ELSE 0 END) as cnt,
+                    COALESCE(SUM(mp_amount), 0) as total_amount_paid
+             FROM mining_payments
+             WHERE mp_min_id IN (${placeholders}) AND mp_status = 'confirmed'
+             GROUP BY mp_min_id`,
             minIds,
         );
 
         for (const r of results) {
-            countMap.set(r.mp_min_id, parseInt(r.cnt, 10));
+            countMap.set(r.mp_min_id, {
+                count: parseInt(r.cnt, 10),
+                totalAmountPaid: parseFloat(r.total_amount_paid || '0'),
+            });
         }
 
         return countMap;
