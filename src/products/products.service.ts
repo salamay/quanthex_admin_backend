@@ -61,16 +61,20 @@ export class ProductsService {
                 SELECT s.*, m.min_id, m.uid as m_uid, m.email as m_email,
                        m.min_created_at, m.min_updated_at, m.min_subscription_id,
                        m.mining_tag, m.mining_wallet_hash, m.mining_wallet_address,
-                       p.referral_code
+                       p.referral_code,
+                       referrer_u.email as referrer_email
                 FROM minings m
                 LEFT JOIN subscriptions s ON s.sub_id = m.min_subscription_id
                 LEFT JOIN profiles p ON p.uid = m.uid
+                LEFT JOIN subscriptions referrer_sub ON referrer_sub.sub_mining_tag = s.sub_referral_code
+                LEFT JOIN users referrer_u ON referrer_u.uid = referrer_sub.uid
                 ${whereClause}
                 ORDER BY m.min_created_at ASC
                 LIMIT ? OFFSET ?
             `;
             const results = await this.dataSource.query(query, [...params, limit, offset]);
 
+            
             // Collect unique uid+subId pairs from results
             const uids: string[] = [];
             const subIds: string[] = [];
@@ -147,6 +151,7 @@ export class ProductsService {
                         sub_wallet_address: row.sub_wallet_address,
                     },
                     referral_code: row.referral_code,
+                    referrer_email: row.referrer_email || null,
                     direct_referral_count: directCount,
                     indirect_referral_count: indirectCount,
                     earnings,

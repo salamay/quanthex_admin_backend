@@ -76,7 +76,7 @@ export class UsersService {
             FROM users u
             LEFT JOIN profiles p ON u.uid = p.uid
             ${whereClause}
-            ORDER BY u.user_created_at ASC
+            ORDER BY u.user_created_at DESC
             LIMIT ? OFFSET ?
         `;
         const dataParams = [...params, limit, offset];

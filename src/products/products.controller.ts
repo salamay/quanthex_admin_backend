@@ -57,6 +57,28 @@ export class ProductsController {
         return await this.productsService.getMiningIndirectReferrals(uid, subscriptionId);
     }
 
+    @Get("admin-direct-referrals")
+    async getAdminDirectReferrals(
+        @Query('uid') uid: string,
+        @Query('subscriptionId') subscriptionId: string,
+    ): Promise<any> {
+        if (!uid || !subscriptionId) {
+            throw new BadRequestException('Missing uid or subscriptionId parameter');
+        }
+        return await this.productsService.getMiningDirectReferrals(uid, subscriptionId);
+    }
+
+    @Get("admin-indirect-referrals")
+    async getAdminIndirectReferrals(
+        @Query('uid') uid: string,
+        @Query('subscriptionId') subscriptionId: string,
+    ): Promise<any> {
+        if (!uid || !subscriptionId) {
+            throw new BadRequestException('Missing uid or subscriptionId parameter');
+        }
+        return await this.productsService.getMiningIndirectReferrals(uid, subscriptionId);
+    }
+
     @Post("submit-payment")
     async submitPayment(@Request() req, @Body() dto: SubmitPaymentDto): Promise<any> {
         const uid = req.user?.uid;
