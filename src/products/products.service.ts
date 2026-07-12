@@ -69,7 +69,7 @@ export class ProductsService {
                 LEFT JOIN subscriptions referrer_sub ON referrer_sub.sub_mining_tag = s.sub_referral_code
                 LEFT JOIN users referrer_u ON referrer_u.uid = referrer_sub.uid
                 ${whereClause}
-                ORDER BY m.min_created_at ASC
+                ORDER BY m.min_created_at DESC
                 LIMIT ? OFFSET ?
             `;
             const results = await this.dataSource.query(query, [...params, limit, offset]);
