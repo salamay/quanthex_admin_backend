@@ -167,6 +167,54 @@ export class UsersService {
         return { data: subscriptions, total };
     }
 
+    async getCompletedHashUsers(minReferrals: number, offset: number = 0, limit: number = 20): Promise<any> {
+        // Find users who have at least one mining with >= minReferrals direct referrals
+        const countQuery = `
+            SELECT COUNT(DISTINCT u.uid) as total
+            FROM users u
+            INNER JOIN minings m ON m.uid = u.uid
+            INNER JOIN subscriptions s ON s.sub_id = m.min_subscription_id
+            INNER JOIN (
+                SELECT referral_uid, referral_subscription_id, COUNT(*) as ref_count
+                FROM referrals
+                GROUP BY referral_uid, referral_subscription_id
+                HAVING COUNT(*) >= ?
+            ) rc ON rc.referral_uid = u.uid AND rc.referral_subscription_id = s.sub_id
+        `;
+        const countResult = await this.userRepository.query(countQuery, [minReferrals]);
+        const total = parseInt(countResult[0]?.total || '0');
+
+        const dataQuery = `
+            SELECT
+                u.uid,
+                u.email,
+                u.account_status,
+                u.roles,
+                u.user_created_at,
+                u.reg_via,
+                p.referral_code,
+                p.profile_created_at,
+                p.profile_updated_at,
+                s.sub_package_name,
+                rc.ref_count as direct_referral_count
+            FROM users u
+            INNER JOIN minings m ON m.uid = u.uid
+            INNER JOIN subscriptions s ON s.sub_id = m.min_subscription_id
+            INNER JOIN (
+                SELECT referral_uid, referral_subscription_id, COUNT(*) as ref_count
+                FROM referrals
+                GROUP BY referral_uid, referral_subscription_id
+                HAVING COUNT(*) >= ?
+            ) rc ON rc.referral_uid = u.uid AND rc.referral_subscription_id = s.sub_id
+            LEFT JOIN profiles p ON u.uid = p.uid
+            ORDER BY rc.ref_count DESC, u.user_created_at DESC
+            LIMIT ? OFFSET ?
+        `;
+        const users = await this.userRepository.query(dataQuery, [minReferrals, limit, offset]);
+
+        return { data: users, total };
+    }
+
     async refferalCodeUser(referralCode: string): Promise<ProfileEntity> {
         this.logger.debug("getting user this referral belongs to ", referralCode)
         const query = "SELECT * from profiles WHERE referral_code=?"

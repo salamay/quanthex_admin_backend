@@ -57,6 +57,23 @@ export class UsersController {
         );
     }
 
+    @Get('completed-hash-users')
+    async getCompletedHashUsers(
+        @Query('minReferrals') minReferrals: string,
+        @Query('offset') offset: string = '0',
+        @Query('limit') limit: string = '20',
+    ): Promise<any> {
+        const min = parseInt(minReferrals);
+        if (!min || min <= 0) {
+            throw new UnauthorizedException('Missing or invalid minReferrals parameter');
+        }
+        return await this.userService.getCompletedHashUsers(
+            min,
+            parseInt(offset),
+            parseInt(limit),
+        );
+    }
+
     @Get('user-subscriptions')
     async getUserSubscriptions(
         @Query('uid') uid: string,
