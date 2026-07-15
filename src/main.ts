@@ -9,8 +9,16 @@ async function bootstrap() {
   };
 
   const app = await NestFactory.create(AppModule);
+
+  // 2. Grab the raw string from .env
+  const rawOrigins = process.env.ORIGIN;
+
+  // 3. Convert the string into a clean array of URLs
+  const allowedOrigins = rawOrigins
+    ? rawOrigins.split(',').map((origin) => origin.trim())
+    : [];
   app.enableCors({
-    origin: process.env.ORIGIN,
+    origin: allowedOrigins,
     methods: 'GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS',
     allowedHeaders: 'Content-Type,Authorization',
     credentials: true,
