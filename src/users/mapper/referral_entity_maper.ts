@@ -9,6 +9,8 @@ export class ReferralEntityMapper {
         referral.referral_id = data.referral_id;
         referral.referral_uid = data.referral_uid;
         referral.referree_uid = data.referree_uid;
+        referral.referral_subscription_id = data.referral_subscription_id;
+        referral.referree_subscription_id = data.referree_subscription_id;
         referral.referral_created_at = data.referral_created_at;
         referral.referral_updated_at = data.referral_updated_at;
         referral.referral_descendant_uid = data.referral_descendant_uid;

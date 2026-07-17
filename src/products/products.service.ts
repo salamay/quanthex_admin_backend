@@ -87,22 +87,23 @@ export class ProductsService {
                     subIds.push(row.sub_id);
                 }
             }
+            const makeKey = (uid: string, subId: string) => `${uid}::${subId}`;
 
             // Batch fetch referral counts using reusable methods
             const directCountMap = await this.getMiningDirectReferralCounts(uids, subIds);
             const indirectCountMap = await this.getMiningIndirectReferralCounts(uids, subIds);
-
+            const indirectReferrals = await this.getBatchMiningIndirectReferrals(subIds);
             // Batch fetch payment counts for all minings in this page
             const minIds = results.map((row: any) => row.min_id).filter(Boolean);
             const paymentCountMap = await this.getBatchPaymentCounts(minIds);
 
-            const makeKey = (uid: string, subId: string) => `${uid}::${subId}`;
             const data = results.map((row: any) => {
                 const key = makeKey(row.m_uid, row.sub_id);
                 const pkg = row.sub_package_name || '';
                 const directCount = directCountMap.get(key) || 0;
                 const indirectCount = indirectCountMap.get(key) || 0;
-                const earnings = EarningCalculator.calcTotalEarning(pkg, directCount, indirectCount);
+                const indirectReferralsList = indirectReferrals.get(row.sub_id) || [];
+                const earnings = EarningCalculator.calcTotalEarning(pkg, row.sub_id, directCount, indirectReferralsList);
 
                 // Per-referral eligibility: eligible if referrals > payments
                 const paymentData = paymentCountMap.get(row.min_id) || { count: 0, totalAmountPaid: 0 };
@@ -161,6 +162,7 @@ export class ProductsService {
                         is_eligible_for_payment: isEligible,
                         total_amount_paid: totalAmountPaid,
                     },
+                    indirect_referrals: indirectReferrals.get(row.sub_id) || [],
                 };
             });
 
@@ -256,6 +258,46 @@ export class ProductsService {
             }
         }
         return countMap;
+    }
+
+    /**
+     * Batch fetch detailed indirect referrals for multiple subscription IDs.
+     * Returns a Map<subId, ReferralDto[]>.
+     */
+    async getBatchMiningIndirectReferrals(subIds: string[]): Promise<Map<string, ReferralDto[]>> {
+        const resultMap = new Map<string, ReferralDto[]>();
+        if (subIds.length === 0) return resultMap;
+
+        const conditions = subIds.map(() => `(JSON_CONTAINS(r.referral_path, ?) AND r.referral_subscription_id != ?)`).join(' OR ');
+        const params: string[] = [];
+        for (let i = 0; i < subIds.length; i++) {
+            params.push(JSON.stringify([subIds[i]]), subIds[i]);
+        }
+
+        const query = `
+            SELECT * FROM referrals r
+            LEFT JOIN profiles p ON r.referree_uid = p.uid
+            WHERE ${conditions}
+        `;
+        const results = await this.dataSource.query(query, params);
+
+        for (const row of results) {
+            const path = typeof row.referral_path === 'string' ? JSON.parse(row.referral_path) : row.referral_path;
+            if (!Array.isArray(path)) continue;
+
+            for (let i = 0; i < subIds.length; i++) {
+                if (path.includes(subIds[i]) && row.referral_subscription_id !== subIds[i]) {
+                    const referralDto = new ReferralDto();
+                    referralDto.info = ReferralEntityMapper.toEntity(row);
+                    referralDto.profile = ProfileMapper.toEntity(row);
+                    if (!resultMap.has(subIds[i])) {
+                        resultMap.set(subIds[i], []);
+                    }
+                    resultMap.get(subIds[i])!.push(referralDto);
+                }
+            }
+        }
+        return resultMap;
     }
 
     /**

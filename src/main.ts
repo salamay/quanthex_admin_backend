@@ -14,11 +14,12 @@ async function bootstrap() {
   const rawOrigins = process.env.ORIGIN;
 
   // 3. Convert the string into a clean array of URLs
-  const allowedOrigins = rawOrigins
-    ? rawOrigins.split(',').map((origin) => origin.trim())
-    : [];
+  const allowedOrigins = rawOrigins.split(',').map((origin) => origin.trim())
+  //Converts to plain string
+  const allowedOriginsString = allowedOrigins.join(', ');
+  console.log("allowedOrigins: ", allowedOriginsString);
   app.enableCors({
-    origin: allowedOrigins,
+    origin: allowedOriginsString,
     methods: 'GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS',
     allowedHeaders: 'Content-Type,Authorization',
     credentials: true,

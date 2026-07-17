@@ -1,3 +1,5 @@
+import { ReferralDto } from "src/users/dtos/referral_dto";
+
 // Package name constants
 const STARTER = 'Starter Mining Package';
 const GROWTH = 'Growth Package';
@@ -104,29 +106,29 @@ export class EarningCalculator {
 
     private static pathAmount(packageName: string, noOfPath: number): number {
         if (packageName === STARTER) {
-            if (noOfPath >= 2 && noOfPath < 3) return 5;
-            if (noOfPath >= 3 && noOfPath < 4) return 1;
-            if (noOfPath >= 4) return 1;
+            if (noOfPath >= 1 && noOfPath < 2) return 5;
+            if (noOfPath >= 2 && noOfPath < 3) return 1;
+            if (noOfPath >= 3) return 1;
             return 0;
         } else if (packageName === GROWTH) {
-            if (noOfPath >= 2 && noOfPath < 3) return 18;
-            if (noOfPath >= 3 && noOfPath < 4) return 4;
-            if (noOfPath >= 4) return 4;
+            if (noOfPath >= 1 && noOfPath < 2) return 18;
+            if (noOfPath >= 2 && noOfPath < 3) return 4;
+            if (noOfPath >= 3) return 4;
             return 0;
         } else if (packageName === ADVANCE) {
-            if (noOfPath >= 2 && noOfPath < 3) return 40;
-            if (noOfPath >= 3 && noOfPath < 4) return 10;
-            if (noOfPath >= 4) return 10;
+            if (noOfPath >= 1 && noOfPath < 2) return 40;
+            if (noOfPath >= 2 && noOfPath < 3) return 10;
+            if (noOfPath >= 3) return 10;
             return 0;
         } else if (packageName === PRO) {
-            if (noOfPath >= 2 && noOfPath < 3) return 90;
-            if (noOfPath >= 3 && noOfPath < 4) return 25;
-            if (noOfPath >= 4) return 25;
+            if (noOfPath >= 1 && noOfPath < 2) return 90;
+            if (noOfPath >= 2 && noOfPath < 3) return 25;
+            if (noOfPath >= 3) return 25;
             return 0;
         } else if (packageName === MEGA) {
-            if (noOfPath >= 2 && noOfPath < 3) return 150;
-            if (noOfPath >= 3 && noOfPath < 4) return 55;
-            if (noOfPath >= 4) return 55;
+            if (noOfPath >= 1 && noOfPath < 2) return 150;
+            if (noOfPath >= 2 && noOfPath < 3) return 55;
+            if (noOfPath >= 3) return 55;
             return 0;
         }
         return 0;
@@ -136,8 +138,18 @@ export class EarningCalculator {
      * Calculate total indirect earnings by summing earnings for each indirect referral.
      * Each referral has a path array; its length determines the earning amount.
      */
-    static calcTotalIndirectEarning(packageName: string, noOfIndirect: number): number {
-        let total = this.calcIndirectEarningPerReferral(packageName, noOfIndirect)
+    static calcTotalIndirectEarning(packageName: string,subId: string,indirectReferrals: ReferralDto[]): number {
+        let total = 0;
+        for (const referral of indirectReferrals) {
+            let index: number = referral.info.referral_path.findIndex(path => path === subId);
+            if (index !== -1) {
+                console.log(` Path ${referral.info.referral_path} and index of is ${index} is ${subId} Length is ${referral.info.referral_path.length} Name: ${packageName}`);
+                const pathLength = referral.info.referral_path.slice(index + 1).length; // Calculate path length from the referral to the current subId
+                console.log(` Path length is ${pathLength}`);
+                total += this.calcIndirectEarningPerReferral(packageName, pathLength);
+            }
+        }
+        console.log(` Total indirect earning for package ${packageName} and subId ${subId} is ${total}`);
         return total;
     }
 
@@ -146,11 +158,12 @@ export class EarningCalculator {
      */
     static calcTotalEarning(
         packageName: string,
+        subId: string,
         directReferralCount: number,
-        indirectReferralPaths: number,
+        indirectReferrals: ReferralDto[],
     ): { directEarning: number; indirectEarning: number; totalEarning: number } {
         const directEarning = this.calcDirectEarning(packageName, directReferralCount);
-        const indirectEarning = this.calcTotalIndirectEarning(packageName, indirectReferralPaths);
+        const indirectEarning = this.calcTotalIndirectEarning(packageName, subId, indirectReferrals);
         const totalEarning = directEarning + indirectEarning;
         return {
             directEarning: parseFloat(directEarning.toFixed(4)),
