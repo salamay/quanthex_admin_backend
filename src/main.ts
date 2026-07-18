@@ -16,7 +16,7 @@ async function bootstrap() {
   // 3. Convert the string into a clean array of URLs
   const allowedOrigins = rawOrigins.split(',').map((origin) => origin.trim())
   //Converts to plain string
-  const allowedOriginsString = allowedOrigins.join(', ');
+  const allowedOriginsString = allowedOrigins.join(',');
   console.log("allowedOrigins: ", allowedOriginsString);
   app.enableCors({
     origin: allowedOriginsString,
