@@ -11,7 +11,7 @@ async function bootstrap() {
   const app = await NestFactory.create(AppModule);
 
   // 2. Grab the raw string from .env
-  const corsOrigins = process.env.CORS_ORIGINS?.split(',').map(origin => origin.trim()) || [];
+  const corsOrigins = process.env.ORIGIN?.split(',').map(origin => origin.trim()) || [];
   //Converts to plain string
   console.log("allowedOrigins: ", corsOrigins);
   app.enableCors({
