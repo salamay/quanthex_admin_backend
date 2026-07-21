@@ -19,7 +19,7 @@ async function bootstrap() {
   const allowedOriginsString = allowedOrigins.join(',');
   console.log("allowedOrigins: ", allowedOriginsString);
   app.enableCors({
-    origin: allowedOriginsString,
+    origin: allowedOrigins,
     methods: 'GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS',
     allowedHeaders: 'Content-Type,Authorization',
     credentials: true,
