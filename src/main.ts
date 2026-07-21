@@ -19,7 +19,10 @@ async function bootstrap() {
   const allowedOriginsString = allowedOrigins.join(',');
   console.log("allowedOrigins: ", allowedOriginsString);
   app.enableCors({
-    origin: allowedOrigins,
+    origin: [
+      'https://empire1704.quanthex.io',
+      'https://xadmin.quanthex.io',
+    ],
     methods: 'GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS',
     allowedHeaders: 'Content-Type,Authorization',
     credentials: true,
