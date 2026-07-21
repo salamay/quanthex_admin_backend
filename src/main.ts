@@ -11,18 +11,11 @@ async function bootstrap() {
   const app = await NestFactory.create(AppModule);
 
   // 2. Grab the raw string from .env
-  const rawOrigins = process.env.ORIGIN;
-
-  // 3. Convert the string into a clean array of URLs
-  const allowedOrigins = rawOrigins.split(',').map((origin) => origin.trim())
+  const corsOrigins = process.env.CORS_ORIGINS?.split(',').map(origin => origin.trim()) || [];
   //Converts to plain string
-  const allowedOriginsString = allowedOrigins.join(',');
-  console.log("allowedOrigins: ", allowedOriginsString);
+  console.log("allowedOrigins: ", corsOrigins);
   app.enableCors({
-    origin: [
-      'https://empire1704.quanthex.io',
-      'https://xadmin.quanthex.io',
-    ],
+    origin: corsOrigins,
     methods: 'GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS',
     allowedHeaders: 'Content-Type,Authorization',
     credentials: true,
