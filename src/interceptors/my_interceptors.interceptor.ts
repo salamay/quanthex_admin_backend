@@ -15,6 +15,7 @@ export class MyInterceptorsInterceptor implements NestInterceptor {
           timestamp: new Date().toISOString(),
           total: data?.total || (Array.isArray(data?.data) ? data.data.length : 1),
           planNames: data?.planNames || undefined,
+          packageNames: data?.packageNames|| undefined,
           data: data?.data || data,
         };
       }),

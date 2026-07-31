@@ -19,6 +19,7 @@ export class ProductsController {
         @Query('packageName') packageName?: string,
         @Query('startDate') startDate?: string,
         @Query('endDate') endDate?: string,
+        @Query('email') email?: string,
     ): Promise<any> {
         const uid = req.user?.uid;
         if (!uid) {
@@ -34,6 +35,7 @@ export class ProductsController {
             packageName,
             parsedStartDate,
             parsedEndDate,
+            email,
         );
     }
 

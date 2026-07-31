@@ -28,8 +28,9 @@ export class ProductsService {
         packageName?: string,
         startDate?: number,
         endDate?: number,
+        email?: string,
     ): Promise<{ data: any[]; total: number }> {
-        this.logger.debug(`Fetching all minings with offset=${offset}, limit=${limit}, packageName=${packageName}, startDate=${startDate}, endDate=${endDate}`);
+        this.logger.debug(`Fetching all minings with offset=${offset}, limit=${limit}, packageName=${packageName}, startDate=${startDate}, endDate=${endDate}, email=${email}`);
         try {
             const conditions: string[] = [];
             const params: any[] = [];
@@ -45,6 +46,10 @@ export class ProductsService {
             if (endDate) {
                 conditions.push('m.min_created_at <= ?');
                 params.push(endDate);
+            }
+            if (email) {
+                conditions.push('m.email LIKE ?');
+                params.push(`%${email}%`);
             }
 
             const whereClause = conditions.length > 0 ? 'WHERE ' + conditions.join(' AND ') : '';
@@ -168,7 +173,6 @@ export class ProductsService {
 
             // Get distinct package names for filter dropdown
             const packageNames = await this.getDistinctPackageNames();
-
             return { data, total, packageNames } as any;
         } catch (err) {
             this.logger.error('Error fetching all minings:', err);
