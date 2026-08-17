@@ -312,7 +312,8 @@ export class ProductsService {
         const referrals: ReferralDto[] = []
         const query = `SELECT * FROM referrals r
                        LEFT JOIN profiles p ON r.referree_uid = p.uid
-                       WHERE r.referral_uid = ? AND r.referral_subscription_id = ?`;
+                       WHERE r.referral_uid = ? AND r.referral_subscription_id = ? 
+                       ORDER BY r.referral_created_at ASC`;
         const referralRepository = this.dataSource.manager.getRepository(ReferralEntity)
         const results: [] = await referralRepository.query(query, [uid, subscriptionId])
         this.logger.debug(`Found ${results.length} direct referrals for user ${uid}`)
@@ -335,7 +336,7 @@ export class ProductsService {
         const referrals: ReferralDto[] = []
         const query = `SELECT * FROM referrals r
                        LEFT JOIN profiles p ON r.referree_uid = p.uid
-                       WHERE JSON_CONTAINS(r.referral_path, ?) AND r.referral_uid != ?`;
+                       WHERE JSON_CONTAINS(r.referral_path, ?) AND r.referral_uid != ? ORDER BY r.referral_created_at ASC`;
         const referralRepository = this.dataSource.manager.getRepository(ReferralEntity)
         const results: [] = await referralRepository.query(query, [JSON.stringify([subscriptionId]), uid])
         this.logger.debug(`Found ${results.length} indirect referrals for user ${uid}`)
